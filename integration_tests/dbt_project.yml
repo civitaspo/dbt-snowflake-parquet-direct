@@ -1,0 +1,4 @@
+name: package_smoke_test
+version: 0.1.0
+config-version: 2
+profile: package_smoke_test

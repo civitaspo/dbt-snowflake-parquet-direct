@@ -1,0 +1,7 @@
+package_smoke_test:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: ':memory:'
+      threads: 1
