@@ -13,3 +13,5 @@ Install [mise](https://mise.jdx.dev/) and run `mise install`, then use:
 The test task loads this package into a small dbt project and parses it with the DuckDB adapter. dbt Core uses Python as its runtime; the package itself uses SQL and Jinja.
 
 Licensed under the Apache License, Version 2.0.
+
+CI verification is in progress.
