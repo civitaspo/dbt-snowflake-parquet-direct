@@ -1,0 +1,1 @@
+# dbt-snowflake-parquet-direct
