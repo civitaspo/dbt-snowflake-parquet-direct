@@ -1,0 +1,26 @@
+name: CI
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions: {}
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    uses: ./.github/workflows/workflow_call_pr.yml
+    permissions:
+      contents: read
+    secrets:
+      CSM_CI_CLIENT_APP_PRIVATE_KEY: ${{ secrets.CSM_CI_CLIENT_APP_PRIVATE_KEY }}
+  status-check:
+    needs: checks
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require successful checks
+        env:
+          RESULT: ${{ needs.checks.result }}
+        run: test "$RESULT" = success
