@@ -1,4 +1,5 @@
 [tools]
+"aqua:astral-sh/uv" = "0.13.1"
 "aqua:jdx/jactionlint" = "2.6.0"
 "aqua:koalaman/shellcheck" = "0.11.0"
 "aqua:suzuki-shunsuke/ghalint" = "1.5.6"
@@ -13,4 +14,4 @@ run = "jactionlint --shellcheck=shellcheck && pinact run --check && ghalint run"
 run = "pinact run && disable-checkout-persist-credentials"
 
 [tasks.test]
-run = "test -f dbt_project.yml"
+run = "uv sync --frozen && uv run dbt deps --project-dir integration_tests --profiles-dir integration_tests && uv run dbt parse --project-dir integration_tests --profiles-dir integration_tests"
