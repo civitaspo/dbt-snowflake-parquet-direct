@@ -14,4 +14,4 @@ run = "jactionlint --shellcheck=shellcheck && pinact run --check && ghalint run"
 run = "pinact run && disable-checkout-persist-credentials"
 
 [tasks.test]
-run = "uv sync --frozen && uv run dbt deps --project-dir integration_tests --profiles-dir integration_tests && uv run dbt parse --project-dir integration_tests --profiles-dir integration_tests"
+run = "uv sync --frozen && uv run dbt deps --project-dir integration_tests --profiles-dir integration_tests && uv run dbt parse --project-dir integration_tests --profiles-dir integration_tests && uv run dbt run-operation run_unit_tests --project-dir integration_tests --profiles-dir integration_tests"

@@ -1,0 +1,94 @@
+{#- Effects of defaults and documentation settings, observed in the CREATE statement and the diff. -#}
+{% macro test_config_effects() %}
+  {%- set package = dbt_snowflake_parquet_direct -%}
+  {%- set relation = test_relation() -%}
+  {%- set one_column = {'base_location': 'a/', 'columns': [{'name': 'id', 'data_type': 'int'}]} -%}
+  {%- set yaml_columns = {'Id': {'description': 'Identifier'}} -%}
+  {%- set create = package.parquet_direct__create_statements -%}
+  {%- set normalize = package.parquet_direct__normalize -%}
+
+  {%- do assert_equal('persist_docs writes descriptions as comments',
+    create(relation, normalize(one_column, 'Model description', yaml_columns, true, true))[0],
+    "create iceberg table DB.SCH.T\n(\n    id int comment 'Identifier'\n)\nbase_location = 'a/'\ncomment = 'Model description'") -%}
+  {%- do assert_equal('without persist_docs there are no comments',
+    create(relation, normalize(one_column, 'Model description', yaml_columns, false, false))[0],
+    "create iceberg table DB.SCH.T\n(\n    id int\n)\nbase_location = 'a/'") -%}
+  {%- do assert_equal('comment wins over persist_docs',
+    create(relation, normalize({'base_location': 'a/', 'comment': 'Explicit'}, 'Model description', {}, true, true))[0],
+    "create iceberg table DB.SCH.T\nbase_location = 'a/'\ncomment = 'Explicit'") -%}
+
+  {%- set extra = {'base_location': 'a/', 'auto_refresh': false, 'columns': [
+    {'name': 'ID', 'type': 'NUMBER(10,0)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': none},
+    {'name': 'EXTRA', 'type': 'VARCHAR(134217728)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': none},
+  ]} -%}
+  {%- set cases = [
+    ('inference is on by default without columns', {'base_location': 'a/'}, 0),
+    ('inference is off by default with columns', one_column, 1),
+    ('schema evolution turns inference on', with_overrides(one_column, {'enable_schema_evolution': true}), 0),
+    ('explicit inference keeps inferred columns', with_overrides(one_column, {'enable_schema_inference': true}), 0),
+  ] -%}
+  {%- for name, declaration, expected in cases -%}
+    {%- set result = package.parquet_direct__diff(relation, normalize(declaration), extra, none_catalog()) -%}
+    {%- do assert_equal(name, result.changes | length, expected) -%}
+  {%- endfor -%}
+{% endmacro %}
+
+{% macro test_ddl() %}
+  {%- set normalize = dbt_snowflake_parquet_direct.parquet_direct__normalize -%}
+  {%- set create = dbt_snowflake_parquet_direct.parquet_direct__create_statements -%}
+  {%- set relation = test_relation() -%}
+
+  {%- set expected -%}
+create iceberg table DB.SCH.T
+(
+    id number(19,0) not null,
+    amount number(12,2) with masking policy gov.policies.mask_amount comment 'it\'s money',
+    source_file varchar as (METADATA$FILENAME),
+    d date as (SPLIT_PART(SPLIT_PART(METADATA$FILENAME, 'd=', 2), '/', 1)::DATE),
+    primary key ("ID") rely,
+    constraint uq_amount unique ("AMOUNT")
+)
+partition by (d)
+external_volume = 'example_volume'
+catalog = 'my_catalog'
+base_location = 'sales/'
+pattern = '.*[.]parquet'
+iceberg_version = 3
+enable_schema_inference = false
+enable_schema_evolution = false
+match_by_column_name = CASE_INSENSITIVE
+auto_refresh = false
+refresh_on_create = true
+replace_invalid_characters = false
+with row access policy gov.policies.row_access_policy on (id)
+with tag (gov.tags.domain = 'sales')
+comment = 'Sales'
+  {%- endset -%}
+  {%- set statements = create(relation, normalize(full_config())) -%}
+  {%- do assert_equal('full create statement', statements[0], expected | trim) -%}
+  {%- do assert_equal('log_event_level is set after creation', statements[1:], ['alter iceberg table DB.SCH.T set log_event_level = ERROR']) -%}
+
+  {%- do assert_equal('minimal create statement', create(relation, normalize({'base_location': 'sales/'})), ["create iceberg table DB.SCH.T\nbase_location = 'sales/'"]) -%}
+
+  {%- set replaced = create(relation, normalize({'base_location': 'sales/'}), replace=true, copy_grants=true) -%}
+  {%- do assert_equal('replace with copy grants', replaced, ["create or replace iceberg table DB.SCH.T\nbase_location = 'sales/'\ncopy grants"]) -%}
+
+  {%- set deferred = create(relation, normalize({'base_location': 'sales/', 'auto_refresh': true, 'refresh_on_create': false, 'columns': [{'name': 'id', 'data_type': 'int'}]})) -%}
+  {%- do assert_equal('auto refresh is switched on after creating without refresh', deferred, [
+    "create iceberg table DB.SCH.T\n(\n    id int\n)\nbase_location = 'sales/'\nauto_refresh = false\nrefresh_on_create = false",
+    'alter iceberg table DB.SCH.T set auto_refresh = true',
+  ]) -%}
+  {%- set immediate = create(relation, normalize({'base_location': 'sales/', 'auto_refresh': true})) -%}
+  {%- do assert_equal('auto refresh at creation', immediate, ["create iceberg table DB.SCH.T\nbase_location = 'sales/'\nauto_refresh = true"]) -%}
+
+  {%- set awkward = normalize({'base_location': 'sales/', 'columns': [{'name': 'a"b', 'data_type': 'int', 'quote': true, 'constraints': [{'type': 'primary_key'}]}]}) -%}
+  {%- do assert_equal('double quotes in quoted names are escaped', create(relation, awkward)[0],
+    'create iceberg table DB.SCH.T\n(\n    "a""b" int,\n    primary key ("a""b")\n)\nbase_location = \'sales/\'') -%}
+
+  {%- set detailed = normalize({'base_location': 'sales/', 'columns': [
+    {'name': 'id', 'data_type': 'int', 'quote': true, 'tag': {'db.sch.b': 'x', 'db.sch.a': 'y'}, 'masking_policy': {'name': 'db.sch.p', 'using': ['id', 'other']}},
+    {'name': 'other', 'data_type': 'int', 'constraints': [{'type': 'foreign_key', 'references': {'table': 'db.sch.parent', 'columns': ['id']}}]},
+  ]}) -%}
+  {%- do assert_equal('column options', create(relation, detailed)[0],
+    "create iceberg table DB.SCH.T\n(\n    \"id\" int with masking policy db.sch.p using (id, other) with tag (db.sch.a = 'y', db.sch.b = 'x'),\n    other int,\n    foreign key (\"OTHER\") references db.sch.parent (\"ID\")\n)\nbase_location = 'sales/'") -%}
+{% endmacro %}
