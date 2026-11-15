@@ -43,21 +43,21 @@
 
   {%- set result = package.parquet_direct__diff(relation, declaration, full_state(), none_catalog()) -%}
   {%- do assert_equal('matching table has no changes', [result.changes, result.notes], [[], []]) -%}
-  {%- set alter = 'alter iceberg table DB.SCH.T' -%}
+  {%- set alter = 'alter iceberg table ANALYTICS.SALES.ORDERS' -%}
   {%- do assert_equal('declared masking policies are re-applied on every run', result.reapply,
-    [alter ~ ' alter column amount set masking policy gov.policies.mask_amount force']) -%}
+    [alter ~ ' alter column amount set masking policy governance.policies.mask_amount force']) -%}
   {%- for name, using, expected in [
     ('using added', ['amount', 'id'], ' using (amount, id)'),
     ('using removed', none, ''),
   ] -%}
-    {%- set policy_declaration = package.parquet_direct__normalize(with_overrides(full_config(), {'columns': [full_config().columns[0], {'name': 'amount', 'data_type': 'number(12,2)', 'masking_policy': {'name': 'gov.policies.mask_amount', 'using': using}, 'comment': "it's money"}]})) -%}
+    {%- set policy_declaration = package.parquet_direct__normalize(with_overrides(full_config(), {'columns': [full_config().columns[0], {'name': 'amount', 'data_type': 'number(12,2)', 'masking_policy': {'name': 'governance.policies.mask_amount', 'using': using}, 'comment': "it's money"}]})) -%}
     {%- set policy_result = package.parquet_direct__diff(relation, policy_declaration, full_state(), none_catalog()) -%}
     {%- do assert_equal('masking policy ' ~ name, [policy_result.changes, policy_result.reapply],
-      [[], [alter ~ ' alter column amount set masking policy gov.policies.mask_amount' ~ expected ~ ' force']]) -%}
+      [[], [alter ~ ' alter column amount set masking policy governance.policies.mask_amount' ~ expected ~ ' force']]) -%}
   {%- endfor -%}
 
   {#- Each case: name, config overrides, state overrides, expected [key, alterable, statements] list. -#}
-  {%- set alter = 'alter iceberg table DB.SCH.T' -%}
+  {%- set alter = 'alter iceberg table ANALYTICS.SALES.ORDERS' -%}
   {%- set columns = full_state().columns -%}
   {%- set cases = [
     ('base_location', {'base_location': 'sales_v2/'}, {}, [['base_location', false, []]]),
@@ -71,10 +71,10 @@
     ('log_event_level', {'log_event_level': 'warn'}, {}, [['log_event_level', true, [alter ~ ' set log_event_level = WARN']]]),
     ('comment', {'comment': "New's"}, {}, [['comment', true, [alter ~ " set comment = 'New\\'s'"]]]),
     ('omitted comment is not compared', {'comment': none}, {'comment': 'Other'}, []),
-    ('row access policy', {'row_access_policy': {'name': 'gov.policies.row_access_policy_v2', 'on': ['id']}}, {}, [['row_access_policy', true, [alter ~ ' drop row access policy GOV.POLICIES.ROW_ACCESS_POLICY, add row access policy gov.policies.row_access_policy_v2 on (id)']]]),
-    ('new row access policy', {}, {'row_access_policy': none}, [['row_access_policy', true, [alter ~ ' add row access policy gov.policies.row_access_policy on (id)']]]),
-    ('table tag', {'tag': {'gov.tags.domain': 'finance', 'gov.tags.owner': 'data'}}, {}, [['tag', true, [alter ~ " set tag gov.tags.domain = 'finance', gov.tags.owner = 'data'"]]]),
-    ('extra table tags are left alone', {}, {'table_tags': {'GOV.TAGS.DOMAIN': 'sales', 'GOV.TAGS.OTHER': 'x'}}, []),
+    ('row access policy', {'row_access_policy': {'name': 'governance.policies.row_access_policy_v2', 'on': ['id']}}, {}, [['row_access_policy', true, [alter ~ ' drop row access policy GOVERNANCE.POLICIES.ROW_ACCESS_POLICY, add row access policy governance.policies.row_access_policy_v2 on (id)']]]),
+    ('new row access policy', {}, {'row_access_policy': none}, [['row_access_policy', true, [alter ~ ' add row access policy governance.policies.row_access_policy on (id)']]]),
+    ('table tag', {'tag': {'governance.tags.domain': 'finance', 'governance.tags.owner': 'data'}}, {}, [['tag', true, [alter ~ " set tag governance.tags.domain = 'finance', governance.tags.owner = 'data'"]]]),
+    ('extra table tags are left alone', {}, {'table_tags': {'GOVERNANCE.TAGS.DOMAIN': 'sales', 'GOVERNANCE.TAGS.OTHER': 'x'}}, []),
     ('missing column', {}, {'columns': columns[1:]}, [['columns', false, []]]),
     ('column type', {}, {'columns': [columns[0], {'name': 'AMOUNT', 'type': 'NUMBER(12,3)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': "it's money"}] + columns[2:]}, [['columns', false, []]]),
     ('column kind', {}, {'columns': columns[:2] + [{'name': 'SOURCE_FILE', 'type': 'VARCHAR(134217728)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': none}] + columns[3:]}, [['columns', false, []], ['columns', false, []]]),
@@ -89,10 +89,13 @@
     ('not_null', {}, {'columns': [{'name': 'ID', 'type': 'NUMBER(19,0)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': none}] + columns[1:]}, [['columns', false, []]]),
     ('undeclared column', {}, {'columns': columns + [{'name': 'EXTRA', 'type': 'VARCHAR(134217728)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': none}]}, [['columns', false, []]]),
     ('column comment', {}, {'columns': [columns[0], {'name': 'AMOUNT', 'type': 'NUMBER(12,2)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': 'old'}] + columns[2:]}, [['columns', true, [alter ~ " alter column amount comment 'it\\'s money'"]]]),
-    ('masking policy', {}, {'masking_policies': {'AMOUNT': 'GOV.POLICIES.OLD'}}, [['columns', true, [alter ~ ' alter column amount set masking policy gov.policies.mask_amount force']]]),
-    ('column tag', {'columns': [full_config().columns[0], {'name': 'amount', 'data_type': 'number(12,2)', 'masking_policy': 'gov.policies.mask_amount', 'comment': "it's money", 'tag': {'gov.tags.pii': 'yes'}}]}, {}, [['columns', true, [alter ~ " alter column amount set tag gov.tags.pii = 'yes'"]]]),
-    ('missing constraint is added', {}, {'constraints': full_state().constraints[:1]}, [['constraints', true, [alter ~ ' add constraint uq_amount unique ("AMOUNT")']]]),
-    ('changed constraint is dropped and added', {'constraints': [{'type': 'unique', 'name': 'uq_amount', 'columns': ['amount'], 'rely': true}]}, {}, [['constraints', true, [alter ~ ' drop constraint UQ_AMOUNT', alter ~ ' add constraint uq_amount unique ("AMOUNT") rely']]]),
+    ('masking policy', {}, {'masking_policies': {'AMOUNT': 'GOVERNANCE.POLICIES.OLD'}}, [['columns', true, [alter ~ ' alter column amount set masking policy governance.policies.mask_amount force']]]),
+    ('column tag', {'columns': [full_config().columns[0], {'name': 'amount', 'data_type': 'number(12,2)', 'masking_policy': 'governance.policies.mask_amount', 'comment': "it's money", 'tag': {'governance.tags.pii': 'yes'}}]}, {}, [['columns', true, [alter ~ " alter column amount set tag governance.tags.pii = 'yes'"]]]),
+    ('missing constraint is added', {}, {'constraints': full_state().constraints[:1]}, [['constraints', true, [alter ~ ' add constraint unique_amount unique ("AMOUNT")']]]),
+    ('changed constraint is dropped and added', {'constraints': [{'type': 'unique', 'name': 'unique_amount', 'columns': ['amount'], 'rely': true}]}, {}, [['constraints', true, [alter ~ ' drop constraint "UNIQUE_AMOUNT"', alter ~ ' add constraint unique_amount unique ("AMOUNT") rely']]]),
+    ('renamed constraint is dropped and added', {'constraints': [{'type': 'unique', 'name': 'renamed_amount', 'columns': ['amount']}]}, {}, [['constraints', true, [alter ~ ' drop constraint "UNIQUE_AMOUNT"', alter ~ ' add constraint renamed_amount unique ("AMOUNT")']]]),
+    ('an omitted constraint name accepts the generated one', {'constraints': [{'type': 'unique', 'columns': ['amount']}]}, {}, []),
+    ('a quoted constraint name keeps its case', {'constraints': [{'type': 'unique', 'name': '"Unique_Amount"', 'columns': ['amount']}]}, {'constraints': full_state().constraints[:1] + [{'type': 'unique', 'name': 'Unique_Amount', 'columns': ['AMOUNT'], 'rely': false, 'references': none}]}, []),
   ] -%}
   {%- for name, config_overrides, state_overrides, expected in cases -%}
     {%- set case_declaration = package.parquet_direct__normalize(with_overrides(full_config(), config_overrides)) -%}
@@ -130,7 +133,7 @@
   ] -%}
   {%- set message = dbt_snowflake_parquet_direct.parquet_direct__recreation_error(test_relation(), changes, 'sales', true) -%}
   {%- set expected -%}
-Parquet Direct table DB.SCH.T has changes that ALTER cannot apply:
+Parquet Direct table ANALYTICS.SALES.ORDERS has changes that ALTER cannot apply:
   - base_location: 'sales/' -> 'sales_v2/'
 Changes that ALTER can apply (not applied):
   - auto_refresh: false -> true

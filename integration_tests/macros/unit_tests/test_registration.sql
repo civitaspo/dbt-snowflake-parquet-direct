@@ -6,11 +6,11 @@
 
   {%- do assert_equal('one statement per refresh path',
     refresh(relation, normalize({'base_location': 'a/', 'refresh_paths': ['d=1/', "it's.parquet"]})),
-    ["alter iceberg table DB.SCH.T refresh 'd=1/'", "alter iceberg table DB.SCH.T refresh 'it\\'s.parquet'"]) -%}
+    ["alter iceberg table ANALYTICS.SALES.ORDERS refresh 'd=1/'", "alter iceberg table ANALYTICS.SALES.ORDERS refresh 'it\\'s.parquet'"]) -%}
   {%- do assert_equal('empty refresh_paths are skipped by default', refresh(relation, normalize({'base_location': 'a/'})), []) -%}
   {%- do assert_equal('empty refresh_paths refresh everything when not skipped',
     refresh(relation, normalize({'base_location': 'a/', 'skip_refresh_if_refresh_paths_empty': false})),
-    ['alter iceberg table DB.SCH.T refresh']) -%}
+    ['alter iceberg table ANALYTICS.SALES.ORDERS refresh']) -%}
   {%- do assert_equal('no manual refresh under auto refresh', refresh(relation, normalize({'base_location': 'a/', 'auto_refresh': true})), []) -%}
 {% endmacro %}
 
@@ -19,8 +19,8 @@
 
   {%- set expected_sql -%}
 select file_name, operation_status, message, operation_time
-from table(DB.information_schema.iceberg_table_file_registration_history(
-    table_name => 'DB.SCH.T',
+from table(ANALYTICS.information_schema.iceberg_table_file_registration_history(
+    table_name => 'ANALYTICS.SALES.ORDERS',
     start_time => to_timestamp_ltz('2026-11-15T00:00:00+00:00')
 ))
 order by operation_time
@@ -59,11 +59,11 @@ order by operation_time
     {'file_name': 'a.parquet', 'operation_status': 'SKIPPED', 'message': 'm1'}, {'file_name': 'b.parquet', 'operation_status': 'REGISTER_FAILED', 'message': 'm2'}, {'file_name': 'c.parquet', 'operation_status': 'SKIPPED', 'message': 'm3'},
   ] -%}
   {%- do assert_equal('skipped message is truncated', package.parquet_direct__skipped_message(test_relation(), skipped, 2),
-    "3 skipped file(s) in DB.SCH.T failed to register or unregister, so the table does not match storage:\n  - a.parquet (SKIPPED): m1\n  - b.parquet (REGISTER_FAILED): m2\n  ... and 1 more") -%}
+    "3 skipped file(s) in ANALYTICS.SALES.ORDERS failed to register or unregister, so the table does not match storage:\n  - a.parquet (SKIPPED): m1\n  - b.parquet (REGISTER_FAILED): m2\n  ... and 1 more") -%}
 
   {%- set running = package.parquet_direct__parse_auto_refresh_status('{"executionState": "RUNNING", "pendingFileCount": 1, "notificationChannelName": "arn"}') -%}
   {%- do assert_equal('auto refresh status', running, {'enabled': true, 'execution_state': 'RUNNING', 'pending_file_count': 1, 'channel_error': none, 'reason': none}) -%}
-  {%- set disabled = package.parquet_direct__parse_auto_refresh_status("Auto refresh is not enabled for table: 'DB.SCH.T'") -%}
+  {%- set disabled = package.parquet_direct__parse_auto_refresh_status("Auto refresh is not enabled for table: 'ANALYTICS.SALES.ORDERS'") -%}
   {%- do assert_equal('auto refresh disabled', disabled.enabled, false) -%}
 {% endmacro %}
 
@@ -82,7 +82,7 @@ order by operation_time
     ('skipped files fail by default', manual, none, skipped, ['error']),
     ('auto refresh running', auto, running, [], []),
     ('auto refresh stalled fails by default', auto, stalled, [], ['error']),
-    ('auto refresh turned off fails by default', auto, "Auto refresh is not enabled for table: 'DB.SCH.T'", [], ['error']),
+    ('auto refresh turned off fails by default', auto, "Auto refresh is not enabled for table: 'ANALYTICS.SALES.ORDERS'", [], ['error']),
     ('severities follow registration_check', lenient, stalled, skipped, ['ignore', 'warn']),
   ] -%}
   {%- for name, declaration, status, rows, expected in cases -%}
@@ -112,21 +112,28 @@ order by operation_time
   {%- for value, expected in cases -%}
     {%- do assert_equal('lookback_hours ' ~ value, package.parquet_direct__lookback_error(value), expected) -%}
   {%- endfor -%}
+
+  {%- set argument_errors = package.parquet_direct__test_argument_errors -%}
+  {%- do assert_equal('valid test arguments', argument_errors(24, ['_tmp/']), []) -%}
+  {%- do assert_equal('a string is not a pattern list', argument_errors(24, '_tmp/'), ['S02: ignore_file_patterns must be a list of strings']) -%}
+  {%- do assert_equal('patterns must be strings', argument_errors(24, [1]), ['S02: ignore_file_patterns must contain only strings']) -%}
+  {%- do assert_equal('non-portable test pattern', error_codes(argument_errors(24, ['(?i)tmp'])), ['S02']) -%}
+  {%- do assert_equal('every argument error is reported', argument_errors(0, 'x') | length, 2) -%}
 {% endmacro %}
 
 {% macro test_expected_auto_refresh() %}
   {%- set expected = dbt_snowflake_parquet_direct.parquet_direct__expected_auto_refresh -%}
   {%- set nodes = [
-    {'resource_type': 'model', 'relation_name': 'DB.SCH."Sales"', 'config': {'meta': {'parquet_direct': {'auto_refresh': true}}}},
-    {'resource_type': 'model', 'relation_name': 'DB.SCH."SALES"', 'config': {'meta': {'parquet_direct': {}}}},
-    {'resource_type': 'test', 'relation_name': 'DB.SCH.T', 'config': {'meta': {}}},
-    {'resource_type': 'model', 'relation_name': 'DB.SCH.TWIN', 'config': {'meta': {}}},
-    {'resource_type': 'model', 'relation_name': 'DB.SCH.TWIN', 'config': {'meta': {}}},
+    {'resource_type': 'model', 'relation_name': 'ANALYTICS.SALES."Sales"', 'config': {'meta': {'parquet_direct': {'auto_refresh': true}}}},
+    {'resource_type': 'model', 'relation_name': 'ANALYTICS.SALES."SALES"', 'config': {'meta': {'parquet_direct': {}}}},
+    {'resource_type': 'test', 'relation_name': 'ANALYTICS.SALES.ORDERS', 'config': {'meta': {}}},
+    {'resource_type': 'model', 'relation_name': 'ANALYTICS.SALES.TWIN', 'config': {'meta': {}}},
+    {'resource_type': 'model', 'relation_name': 'ANALYTICS.SALES.TWIN', 'config': {'meta': {}}},
   ] -%}
-  {%- do assert_equal('quoted name keeps its case (auto)', expected(none, 'DB.SCH."Sales"', nodes), {'value': true, 'error': none}) -%}
-  {%- do assert_equal('quoted name keeps its case (manual)', expected(none, 'DB.SCH."SALES"', nodes), {'value': false, 'error': none}) -%}
-  {%- do assert_equal('explicit argument wins', expected(false, 'DB.SCH."Sales"', nodes), {'value': false, 'error': none}) -%}
-  {%- do assert_equal('string argument is rejected', expected('false', 'DB.SCH."Sales"', nodes).error, 'auto_refresh must be true, false, or omitted, got false') -%}
-  {%- do assert_equal('unknown relation needs the argument', expected(none, 'DB.SCH.T', nodes).error, 'found 0 models for DB.SCH.T; set the auto_refresh argument') -%}
-  {%- do assert_equal('ambiguous relation needs the argument', expected(none, 'DB.SCH.TWIN', nodes).value, none) -%}
+  {%- do assert_equal('quoted name keeps its case (auto)', expected(none, 'ANALYTICS.SALES."Sales"', nodes), {'value': true, 'error': none}) -%}
+  {%- do assert_equal('quoted name keeps its case (manual)', expected(none, 'ANALYTICS.SALES."SALES"', nodes), {'value': false, 'error': none}) -%}
+  {%- do assert_equal('explicit argument wins', expected(false, 'ANALYTICS.SALES."Sales"', nodes), {'value': false, 'error': none}) -%}
+  {%- do assert_equal('string argument is rejected', expected('false', 'ANALYTICS.SALES."Sales"', nodes).error, 'auto_refresh must be true, false, or omitted, got false') -%}
+  {%- do assert_equal('unknown relation needs the argument', expected(none, 'ANALYTICS.SALES.ORDERS', nodes).error, 'found 0 models for ANALYTICS.SALES.ORDERS; set the auto_refresh argument') -%}
+  {%- do assert_equal('ambiguous relation needs the argument', expected(none, 'ANALYTICS.SALES.TWIN', nodes).value, none) -%}
 {% endmacro %}

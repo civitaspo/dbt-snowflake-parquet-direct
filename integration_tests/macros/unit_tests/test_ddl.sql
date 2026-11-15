@@ -9,13 +9,13 @@
 
   {%- do assert_equal('persist_docs writes descriptions as comments',
     create(relation, normalize(one_column, 'Model description', yaml_columns, true, true))[0],
-    "create iceberg table DB.SCH.T\n(\n    id int comment 'Identifier'\n)\nbase_location = 'a/'\ncomment = 'Model description'") -%}
+    "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    id int comment 'Identifier'\n)\nbase_location = 'a/'\ncomment = 'Model description'") -%}
   {%- do assert_equal('without persist_docs there are no comments',
     create(relation, normalize(one_column, 'Model description', yaml_columns, false, false))[0],
-    "create iceberg table DB.SCH.T\n(\n    id int\n)\nbase_location = 'a/'") -%}
+    "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    id int\n)\nbase_location = 'a/'") -%}
   {%- do assert_equal('comment wins over persist_docs',
     create(relation, normalize({'base_location': 'a/', 'comment': 'Explicit'}, 'Model description', {}, true, true))[0],
-    "create iceberg table DB.SCH.T\nbase_location = 'a/'\ncomment = 'Explicit'") -%}
+    "create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'a/'\ncomment = 'Explicit'") -%}
 
   {%- set extra = {'base_location': 'a/', 'auto_refresh': false, 'columns': [
     {'name': 'ID', 'type': 'NUMBER(10,0)', 'kind': 'COLUMN', 'nullable': true, 'expression': none, 'comment': none},
@@ -39,14 +39,14 @@
   {%- set relation = test_relation() -%}
 
   {%- set expected -%}
-create iceberg table DB.SCH.T
+create iceberg table ANALYTICS.SALES.ORDERS
 (
     id number(19,0) not null,
-    amount number(12,2) with masking policy gov.policies.mask_amount comment 'it\'s money',
+    amount number(12,2) with masking policy governance.policies.mask_amount comment 'it\'s money',
     source_file varchar as (METADATA$FILENAME),
     d date as (SPLIT_PART(SPLIT_PART(METADATA$FILENAME, 'd=', 2), '/', 1)::DATE),
     primary key ("ID") rely,
-    constraint uq_amount unique ("AMOUNT")
+    constraint unique_amount unique ("AMOUNT")
 )
 partition by (d)
 external_volume = 'example_volume'
@@ -60,35 +60,35 @@ match_by_column_name = CASE_INSENSITIVE
 auto_refresh = false
 refresh_on_create = true
 replace_invalid_characters = false
-with row access policy gov.policies.row_access_policy on (id)
-with tag (gov.tags.domain = 'sales')
+with row access policy governance.policies.row_access_policy on (id)
+with tag (governance.tags.domain = 'sales')
 comment = 'Sales'
   {%- endset -%}
   {%- set statements = create(relation, normalize(full_config())) -%}
   {%- do assert_equal('full create statement', statements[0], expected | trim) -%}
-  {%- do assert_equal('log_event_level is set after creation', statements[1:], ['alter iceberg table DB.SCH.T set log_event_level = ERROR']) -%}
+  {%- do assert_equal('log_event_level is set after creation', statements[1:], ['alter iceberg table ANALYTICS.SALES.ORDERS set log_event_level = ERROR']) -%}
 
-  {%- do assert_equal('minimal create statement', create(relation, normalize({'base_location': 'sales/'})), ["create iceberg table DB.SCH.T\nbase_location = 'sales/'"]) -%}
+  {%- do assert_equal('minimal create statement', create(relation, normalize({'base_location': 'sales/'})), ["create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'"]) -%}
 
   {%- set replaced = create(relation, normalize({'base_location': 'sales/'}), replace=true, copy_grants=true) -%}
-  {%- do assert_equal('replace with copy grants', replaced, ["create or replace iceberg table DB.SCH.T\nbase_location = 'sales/'\ncopy grants"]) -%}
+  {%- do assert_equal('replace with copy grants', replaced, ["create or replace iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\ncopy grants"]) -%}
 
   {%- set deferred = create(relation, normalize({'base_location': 'sales/', 'auto_refresh': true, 'refresh_on_create': false, 'columns': [{'name': 'id', 'data_type': 'int'}]})) -%}
   {%- do assert_equal('auto refresh is switched on after creating without refresh', deferred, [
-    "create iceberg table DB.SCH.T\n(\n    id int\n)\nbase_location = 'sales/'\nauto_refresh = false\nrefresh_on_create = false",
-    'alter iceberg table DB.SCH.T set auto_refresh = true',
+    "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    id int\n)\nbase_location = 'sales/'\nauto_refresh = false\nrefresh_on_create = false",
+    'alter iceberg table ANALYTICS.SALES.ORDERS set auto_refresh = true',
   ]) -%}
   {%- set immediate = create(relation, normalize({'base_location': 'sales/', 'auto_refresh': true})) -%}
-  {%- do assert_equal('auto refresh at creation', immediate, ["create iceberg table DB.SCH.T\nbase_location = 'sales/'\nauto_refresh = true"]) -%}
+  {%- do assert_equal('auto refresh at creation', immediate, ["create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\nauto_refresh = true"]) -%}
 
   {%- set awkward = normalize({'base_location': 'sales/', 'columns': [{'name': 'a"b', 'data_type': 'int', 'quote': true, 'constraints': [{'type': 'primary_key'}]}]}) -%}
   {%- do assert_equal('double quotes in quoted names are escaped', create(relation, awkward)[0],
-    'create iceberg table DB.SCH.T\n(\n    "a""b" int,\n    primary key ("a""b")\n)\nbase_location = \'sales/\'') -%}
+    'create iceberg table ANALYTICS.SALES.ORDERS\n(\n    "a""b" int,\n    primary key ("a""b")\n)\nbase_location = \'sales/\'') -%}
 
   {%- set detailed = normalize({'base_location': 'sales/', 'columns': [
-    {'name': 'id', 'data_type': 'int', 'quote': true, 'tag': {'db.sch.b': 'x', 'db.sch.a': 'y'}, 'masking_policy': {'name': 'db.sch.p', 'using': ['id', 'other']}},
-    {'name': 'other', 'data_type': 'int', 'constraints': [{'type': 'foreign_key', 'references': {'table': 'db.sch.parent', 'columns': ['id']}}]},
+    {'name': 'id', 'data_type': 'int', 'quote': true, 'tag': {'governance.tags.beta': 'x', 'governance.tags.alpha': 'y'}, 'masking_policy': {'name': 'governance.policies.mask_id', 'using': ['id', 'other']}},
+    {'name': 'other', 'data_type': 'int', 'constraints': [{'type': 'foreign_key', 'references': {'table': 'analytics.sales.parent', 'columns': ['id']}}]},
   ]}) -%}
   {%- do assert_equal('column options', create(relation, detailed)[0],
-    "create iceberg table DB.SCH.T\n(\n    \"id\" int with masking policy db.sch.p using (id, other) with tag (db.sch.a = 'y', db.sch.b = 'x'),\n    other int,\n    foreign key (\"OTHER\") references db.sch.parent (\"ID\")\n)\nbase_location = 'sales/'") -%}
+    "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    \"id\" int with masking policy governance.policies.mask_id using (id, other) with tag (governance.tags.alpha = 'y', governance.tags.beta = 'x'),\n    other int,\n    foreign key (\"OTHER\") references analytics.sales.parent (\"ID\")\n)\nbase_location = 'sales/'") -%}
 {% endmacro %}

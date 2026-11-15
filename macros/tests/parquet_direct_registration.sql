@@ -8,9 +8,7 @@
 {%- if model is string -%}
   {{ exceptions.raise_compiler_error('parquet_direct_registration does not support the where config, because it reads the table by name') }}
 {%- endif -%}
-{%- set errors = package.parquet_direct__ignore_pattern_errors(ignore_file_patterns, 'ignore_file_patterns') -%}
-{%- set lookback_error = package.parquet_direct__lookback_error(lookback_hours) -%}
-{%- if lookback_error -%}{%- do errors.append(lookback_error) -%}{%- endif -%}
+{%- set errors = package.parquet_direct__test_argument_errors(lookback_hours, ignore_file_patterns) -%}
 {%- set expected = {'value': none, 'error': none} -%}
 {%- if execute -%}
   {%- set expected = package.parquet_direct__expected_auto_refresh(auto_refresh, model | string, graph.nodes.values()) -%}

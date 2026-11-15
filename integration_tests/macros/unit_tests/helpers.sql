@@ -32,7 +32,7 @@
 {% endmacro %}
 
 {% macro test_relation() %}
-  {{ return(api.Relation.create(database='DB', schema='SCH', identifier='T', quote_policy={'database': false, 'schema': false, 'identifier': false})) }}
+  {{ return(api.Relation.create(database='ANALYTICS', schema='SALES', identifier='ORDERS', quote_policy={'database': false, 'schema': false, 'identifier': false})) }}
 {% endmacro %}
 
 {# A configuration that uses every option. #}
@@ -52,13 +52,13 @@
     'log_event_level': 'error',
     'columns': [
       {'name': 'id', 'data_type': 'number(19,0)', 'not_null': true, 'constraints': [{'type': 'primary_key', 'rely': true}]},
-      {'name': 'amount', 'data_type': 'number(12,2)', 'masking_policy': 'gov.policies.mask_amount', 'comment': "it's money"},
+      {'name': 'amount', 'data_type': 'number(12,2)', 'masking_policy': 'governance.policies.mask_amount', 'comment': "it's money"},
     ],
     'virtual_columns': [{'name': 'source_file', 'data_type': 'varchar', 'expression': 'METADATA$FILENAME'}],
     'partition_columns': [{'name': 'd', 'data_type': 'date', 'expression': "SPLIT_PART(SPLIT_PART(METADATA$FILENAME, 'd=', 2), '/', 1)::DATE"}],
-    'constraints': [{'type': 'unique', 'name': 'uq_amount', 'columns': ['amount']}],
-    'row_access_policy': {'name': 'gov.policies.row_access_policy', 'on': ['id']},
-    'tag': {'gov.tags.domain': 'sales'},
+    'constraints': [{'type': 'unique', 'name': 'unique_amount', 'columns': ['amount']}],
+    'row_access_policy': {'name': 'governance.policies.row_access_policy', 'on': ['id']},
+    'tag': {'governance.tags.domain': 'sales'},
     'comment': 'Sales',
     'refresh_paths': ['d=2026-11-15/'],
     'registration_check': {'on_skipped': 'warn', 'ignore_file_patterns': ['_tmp']},
@@ -82,13 +82,13 @@
       {'name': 'SOURCE_FILE', 'type': 'VARCHAR(134217728)', 'kind': 'VIRTUAL', 'nullable': true, 'expression': 'METADATA$FILENAME', 'comment': none},
       {'name': 'D', 'type': 'DATE', 'kind': 'PARTITION', 'nullable': true, 'expression': "SPLIT_PART(SPLIT_PART(METADATA$FILENAME, 'd=', 2), '/', 1)::DATE", 'comment': none},
     ],
-    'masking_policies': {'AMOUNT': 'GOV.POLICIES.MASK_AMOUNT'},
-    'row_access_policy': {'name': 'GOV.POLICIES.ROW_ACCESS_POLICY', 'on': ['ID']},
-    'table_tags': {'GOV.TAGS.DOMAIN': 'sales'},
+    'masking_policies': {'AMOUNT': 'GOVERNANCE.POLICIES.MASK_AMOUNT'},
+    'row_access_policy': {'name': 'GOVERNANCE.POLICIES.ROW_ACCESS_POLICY', 'on': ['ID']},
+    'table_tags': {'GOVERNANCE.TAGS.DOMAIN': 'sales'},
     'column_tags': {},
     'constraints': [
       {'type': 'primary_key', 'name': 'SYS_CONSTRAINT_1', 'columns': ['ID'], 'rely': true, 'references': none},
-      {'type': 'unique', 'name': 'UQ_AMOUNT', 'columns': ['AMOUNT'], 'rely': false, 'references': none},
+      {'type': 'unique', 'name': 'UNIQUE_AMOUNT', 'columns': ['AMOUNT'], 'rely': false, 'references': none},
     ],
   }) }}
 {% endmacro %}

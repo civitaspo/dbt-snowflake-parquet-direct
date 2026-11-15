@@ -22,7 +22,7 @@
   {{ return('"' ~ name.replace('"', '""') ~ '"') }}
 {%- endmacro %}
 
-{# A three-part object name as Snowflake stores it, such as DB.SCHEMA.POLICY. #}
+{# A three-part object name as Snowflake stores it, such as DATABASE.SCHEMA.POLICY. #}
 {% macro parquet_direct__qualify(name) -%}
   {#- shortcut: dots inside quoted identifiers are not supported. -#}
   {%- set parts = [] -%}

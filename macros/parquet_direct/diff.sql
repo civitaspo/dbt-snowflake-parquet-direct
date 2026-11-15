@@ -11,18 +11,18 @@
   {%- set text = modules.re.sub('\\s+', '', token) -%}
   {%- set match = modules.re.match('^([A-Z_][A-Z0-9_]*)(?:\\((.*)\\))?$', text) -%}
   {%- if not match -%}{{ return(text) }}{%- endif -%}
-  {%- set name, args = match.group(1), match.group(2) -%}
+  {%- set name, parameters = match.group(1), match.group(2) -%}
   {%- if name in ['INT', 'INTEGER'] -%}{{ return('NUMBER(10,0)') }}
   {#- shortcut: BIGINT is assumed to map to Iceberg long like LONG; confirm in the integration tests. -#}
   {%- elif name in ['LONG', 'BIGINT'] -%}{{ return('NUMBER(19,0)') }}
   {%- elif name in ['NUMBER', 'DECIMAL', 'NUMERIC'] -%}
-    {%- if not args -%}{{ return('NUMBER(38,0)') }}{%- endif -%}
-    {{ return('NUMBER(' ~ args ~ ',0)' if ',' not in args else 'NUMBER(' ~ args ~ ')') }}
+    {%- if not parameters -%}{{ return('NUMBER(38,0)') }}{%- endif -%}
+    {{ return('NUMBER(' ~ parameters ~ ',0)' if ',' not in parameters else 'NUMBER(' ~ parameters ~ ')') }}
   {%- elif name in ['STRING', 'TEXT', 'VARCHAR'] -%}{{ return('VARCHAR(134217728)') }}
   {%- elif name in ['FLOAT', 'FLOAT4', 'FLOAT8', 'DOUBLE', 'REAL'] -%}{{ return('FLOAT') }}
-  {%- elif name in ['TIMESTAMP', 'TIMESTAMP_NTZ', 'DATETIME'] -%}{{ return('TIMESTAMP_NTZ(' ~ (args or '6') ~ ')') }}
-  {%- elif name in ['TIMESTAMP_LTZ', 'TIME'] -%}{{ return(name ~ '(' ~ (args or '6') ~ ')') }}
-  {%- elif name in ['BINARY', 'VARBINARY'] and not args -%}{{ return('BINARY(8388608)') }}
+  {%- elif name in ['TIMESTAMP', 'TIMESTAMP_NTZ', 'DATETIME'] -%}{{ return('TIMESTAMP_NTZ(' ~ (parameters or '6') ~ ')') }}
+  {%- elif name in ['TIMESTAMP_LTZ', 'TIME'] -%}{{ return(name ~ '(' ~ (parameters or '6') ~ ')') }}
+  {%- elif name in ['BINARY', 'VARBINARY'] and not parameters -%}{{ return('BINARY(8388608)') }}
   {%- endif -%}
   {{ return(text) }}
 {%- endmacro %}
@@ -252,15 +252,25 @@
 
   {#- Constraints are managed only when the model declares some. -#}
   {%- if declaration.constraints -%}
-    {%- set declared_keys = {} -%}
-    {%- for constraint in declaration.constraints -%}{%- do declared_keys.update({dbt_snowflake_parquet_direct.parquet_direct__constraint_key(constraint): constraint}) -%}{%- endfor -%}
-    {%- set actual_keys = {} -%}
-    {%- for constraint in state.constraints or [] -%}{%- do actual_keys.update({dbt_snowflake_parquet_direct.parquet_direct__constraint_key(constraint): constraint}) -%}{%- endfor -%}
-    {%- set statements = [] -%}
-    {%- for key, constraint in actual_keys.items() if key not in declared_keys -%}
-      {%- do statements.append(alter ~ ' drop constraint ' ~ constraint.name) -%}
+    {#- A declared name must match; an omitted name accepts the name Snowflake generated. Named ones match first. -#}
+    {%- set matched = [] -%}
+    {%- set missing = [] -%}
+    {%- for named in [true, false] -%}
+      {%- for constraint in declaration.constraints if (constraint.name is not none) == named -%}
+        {%- set key = dbt_snowflake_parquet_direct.parquet_direct__constraint_key(constraint) -%}
+        {%- set name = dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(constraint.name) if named else none -%}
+        {%- set candidates = [] -%}
+        {%- for actual in state.constraints or [] if actual.name not in matched and (name is none or actual.name == name) and dbt_snowflake_parquet_direct.parquet_direct__constraint_key(actual) == key -%}
+          {%- do candidates.append(actual.name) -%}
+        {%- endfor -%}
+        {%- if candidates -%}{%- do matched.append(candidates[0]) -%}{%- else -%}{%- do missing.append(constraint) -%}{%- endif -%}
+      {%- endfor -%}
     {%- endfor -%}
-    {%- for key, constraint in declared_keys.items() if key not in actual_keys -%}
+    {%- set statements = [] -%}
+    {%- for constraint in state.constraints or [] if constraint.name not in matched -%}
+      {%- do statements.append(alter ~ ' drop constraint ' ~ dbt_snowflake_parquet_direct.parquet_direct__quote_identifier(constraint.name)) -%}
+    {%- endfor -%}
+    {%- for constraint in missing -%}
       {%- do statements.append(alter ~ ' add ' ~ dbt_snowflake_parquet_direct.parquet_direct__constraint_sql(constraint)) -%}
     {%- endfor -%}
     {%- if statements -%}

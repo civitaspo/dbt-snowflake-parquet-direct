@@ -44,7 +44,7 @@ def parquet(ids, id_type=pa.int32()):
     return buffer.getvalue()
 
 
-class Env:
+class IntegrationEnvironment:
     def __init__(self):
         run_id = uuid.uuid4().hex[:8]
         self.schema = f"PARQUET_DIRECT_INTEGRATION_TEST_{run_id}".upper()
@@ -109,99 +109,99 @@ class Env:
 
 
 @pytest.fixture(scope="module")
-def env():
-    env = Env()
-    env.sql(f"create schema if not exists {os.environ['SNOWFLAKE_DATABASE']}.{env.schema}")
-    ok, output = env.dbt("deps")
+def environment():
+    environment = IntegrationEnvironment()
+    environment.sql(f"create schema if not exists {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
+    ok, output = environment.dbt("deps")
     assert ok, output
-    yield env
-    env.cleanup()
+    yield environment
+    environment.cleanup()
 
 
-def test_create_then_rerun_is_unchanged(env):
-    env.put("create_and_rerun/d=2026-11-15/a.parquet", parquet([1, 2]))
-    ok, output = env.dbt("run", "-s", "manual_table", "--full-refresh", data_directory="create_and_rerun")
+def test_create_then_rerun_is_unchanged(environment):
+    environment.put("create_and_rerun/d=2026-11-15/a.parquet", parquet([1, 2]))
+    ok, output = environment.dbt("run", "-s", "manual_table", "--full-refresh", data_directory="create_and_rerun")
     assert ok, output
     assert output.startswith("created"), output
-    assert env.count("manual_table") == 2
+    assert environment.count("manual_table") == 2
 
-    ok, output = env.dbt("run", "-s", "manual_table", data_directory="create_and_rerun")
+    ok, output = environment.dbt("run", "-s", "manual_table", data_directory="create_and_rerun")
     assert ok, output
     assert output.startswith("unchanged"), output
 
 
-def test_alterable_change_is_applied(env):
-    ok, output = env.dbt("run", "-s", "manual_table", data_directory="create_and_rerun", table_comment="v2")
+def test_alterable_change_is_applied(environment):
+    ok, output = environment.dbt("run", "-s", "manual_table", data_directory="create_and_rerun", table_comment="v2")
     assert ok, output
     assert output.startswith("altered"), output
-    shown = env.sql(f"show iceberg tables like 'MANUAL_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{env.schema}")
+    shown = environment.sql(f"show iceberg tables like 'MANUAL_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
     assert shown[0]["comment"] == "v2"
 
 
-def test_recreation_required_change_stops_until_full_refresh(env):
-    ok, output = env.dbt("run", "-s", "manual_table", data_directory="create_and_rerun", table_comment="v2", id_type="long")
+def test_recreation_required_change_stops_until_full_refresh(environment):
+    ok, output = environment.dbt("run", "-s", "manual_table", data_directory="create_and_rerun", table_comment="v2", id_type="long")
     assert not ok
     assert "ALTER cannot apply" in output and "ID type" in output, output
 
-    ok, output = env.dbt("run", "-s", "manual_table", "--full-refresh", data_directory="create_and_rerun", table_comment="v2", id_type="long")
+    ok, output = environment.dbt("run", "-s", "manual_table", "--full-refresh", data_directory="create_and_rerun", table_comment="v2", id_type="long")
     assert ok, output
-    columns = {row["name"]: row["type"] for row in env.sql(f"desc iceberg table {env.table('manual_table')}")}
+    columns = {row["name"]: row["type"] for row in environment.sql(f"desc iceberg table {environment.table('manual_table')}")}
     assert columns["ID"] == "NUMBER(19,0)"
-    assert env.count("manual_table") == 2
+    assert environment.count("manual_table") == 2
 
 
-def test_full_refresh_false_blocks_recreation(env):
-    ok, output = env.dbt("run", "-s", "manual_table", "--full-refresh", data_directory="create_and_rerun", table_comment="v2", full_refresh_setting=False)
+def test_full_refresh_false_blocks_recreation(environment):
+    ok, output = environment.dbt("run", "-s", "manual_table", "--full-refresh", data_directory="create_and_rerun", table_comment="v2", full_refresh_setting=False)
     assert not ok
     assert "full_refresh: false" in output, output
 
 
-def test_refresh_paths_register_only_listed_paths(env):
-    env.put("refresh_paths/d=1/a.parquet", parquet([1]))
-    env.put("refresh_paths/d=2/b.parquet", parquet([2, 3]))
+def test_refresh_paths_register_only_listed_paths(environment):
+    environment.put("refresh_paths/d=1/a.parquet", parquet([1]))
+    environment.put("refresh_paths/d=2/b.parquet", parquet([2, 3]))
     common = {"data_directory": "refresh_paths", "refresh_on_create": False}
-    ok, output = env.dbt("run", "-s", "manual_table", "--full-refresh", refresh_paths=["d=1/"], **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", "--full-refresh", refresh_paths=["d=1/"], **common)
     assert ok, output
-    assert env.count("manual_table") == 1
+    assert environment.count("manual_table") == 1
 
-    ok, output = env.dbt("run", "-s", "manual_table", refresh_paths=["d=2/"], **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", refresh_paths=["d=2/"], **common)
     assert ok, output
-    assert env.count("manual_table") == 3
+    assert environment.count("manual_table") == 3
 
-    ok, output = env.dbt("run", "-s", "manual_table", refresh_paths=["no-such-dir/"], **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", refresh_paths=["no-such-dir/"], **common)
     assert ok, output
-    assert env.count("manual_table") == 3, "a nonexistent refresh path must not refresh the whole base location"
+    assert environment.count("manual_table") == 3, "a nonexistent refresh path must not refresh the whole base location"
 
 
-def test_skipped_file_fails_the_run(env):
-    env.put("skipped_file/d=1/good.parquet", parquet([1]))
-    env.put("skipped_file/d=1/broken.parquet", b"not parquet")
+def test_skipped_file_fails_the_run(environment):
+    environment.put("skipped_file/d=1/good.parquet", parquet([1]))
+    environment.put("skipped_file/d=1/broken.parquet", b"not parquet")
     common = {"data_directory": "skipped_file", "refresh_on_create": False, "refresh_paths": ["d=1/"]}
-    ok, output = env.dbt("run", "-s", "manual_table", "--full-refresh", **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", "--full-refresh", **common)
     assert not ok
     assert "skipped file(s)" in output and "broken.parquet" in output, output
-    assert env.count("manual_table") == 1
+    assert environment.count("manual_table") == 1
 
-    ok, output = env.dbt("run", "-s", "manual_table", on_skipped="warn", **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", on_skipped="warn", **common)
     assert ok, output
 
 
-def test_generic_test_reports_skipped_file(env):
-    ok, output = env.dbt("test", "-s", "manual_table", "--exclude", "tag:ignore_check", data_directory="skipped_file", refresh_on_create=False, refresh_paths=["d=1/"])
+def test_generic_test_reports_skipped_file(environment):
+    ok, output = environment.dbt("test", "-s", "manual_table", "--exclude", "tag:ignore_check", data_directory="skipped_file", refresh_on_create=False, refresh_paths=["d=1/"])
     assert not ok, output
 
 
-def test_ignore_patterns_agree_between_run_and_test(env):
+def test_ignore_patterns_agree_between_run_and_test(environment):
     # The model run evaluates the pattern in Python and the generic test in Snowflake.
     common = {"data_directory": "skipped_file", "refresh_on_create": False, "refresh_paths": ["d=1/"]}
-    ok, output = env.dbt("run", "-s", "manual_table", ignore_file_patterns=["/broken[.]parquet$"], **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", ignore_file_patterns=["/broken[.]parquet$"], **common)
     assert ok, output
-    ok, output = env.dbt("test", "-s", "tag:ignore_check", **common)
+    ok, output = environment.dbt("test", "-s", "tag:ignore_check", **common)
     assert ok, output
 
 
-def test_run_operation_reports_skipped_file(env):
-    ok, output = env.dbt(
+def test_run_operation_reports_skipped_file(environment):
+    ok, output = environment.dbt(
         "run-operation", "parquet_direct_check_registration", "--args", "{model: manual_table, lookback_hours: 1}",
         data_directory="skipped_file", refresh_on_create=False, refresh_paths=["d=1/"],
     )
@@ -209,84 +209,84 @@ def test_run_operation_reports_skipped_file(env):
     assert "broken.parquet" in output, output
 
 
-def test_type_conflict_fails_the_refresh(env):
-    env.put("type_conflict/d=1/int.parquet", parquet([1]))
+def test_type_conflict_fails_the_refresh(environment):
+    environment.put("type_conflict/d=1/int.parquet", parquet([1]))
     common = {"data_directory": "type_conflict", "refresh_paths": ["d=2/"]}
-    ok, output = env.dbt("run", "-s", "manual_table", "--full-refresh", **common)
+    ok, output = environment.dbt("run", "-s", "manual_table", "--full-refresh", **common)
     assert ok, output
-    env.put("type_conflict/d=2/string.parquet", parquet(["x"], pa.string()))
-    ok, output = env.dbt("run", "-s", "manual_table", **common)
+    environment.put("type_conflict/d=2/string.parquet", parquet(["x"], pa.string()))
+    ok, output = environment.dbt("run", "-s", "manual_table", **common)
     assert not ok
     assert "incompatible" in output.lower(), output
 
 
-def test_invalid_config_fails_before_any_sql(env):
-    ok, output = env.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_base_location="no-trailing-slash")
+def test_invalid_config_fails_before_any_sql(environment):
+    ok, output = environment.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_base_location="no-trailing-slash")
     assert not ok
     assert "S03" in output, output
-    assert not env.sql(f"show objects like 'GUARDED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{env.schema}")
+    assert not environment.sql(f"show objects like 'GUARDED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
 
 
-def test_other_object_is_never_replaced(env):
-    env.sql(f"create view {env.table('occupied_table')} as select 1 as id")
-    ok, output = env.dbt("run", "-s", "guarded_table", "--full-refresh", guarded_table_enabled=True, guarded_alias="occupied_table")
+def test_other_object_is_never_replaced(environment):
+    environment.sql(f"create view {environment.table('occupied_table')} as select 1 as id")
+    ok, output = environment.dbt("run", "-s", "guarded_table", "--full-refresh", guarded_table_enabled=True, guarded_alias="occupied_table")
     assert not ok
     assert "R03" in output, output
-    assert env.sql(f"show views like 'OCCUPIED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{env.schema}")
+    assert environment.sql(f"show views like 'OCCUPIED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
 
 
-def test_hive_partition_column_is_inferred(env):
-    env.put("hive/d=2026-11-15/a.parquet", parquet([1, 2]))
-    ok, output = env.dbt("run", "-s", "hive_table", "--full-refresh")
+def test_hive_partition_column_is_inferred(environment):
+    environment.put("hive/d=2026-11-15/a.parquet", parquet([1, 2]))
+    ok, output = environment.dbt("run", "-s", "hive_table", "--full-refresh")
     assert ok, output
-    kinds = {row["name"]: row["kind"] for row in env.sql(f"desc iceberg table {env.table('hive_table')}")}
+    kinds = {row["name"]: row["kind"] for row in environment.sql(f"desc iceberg table {environment.table('hive_table')}")}
     assert kinds.get("D") == "PARTITION", kinds
 
-    ok, output = env.dbt("run", "-s", "hive_table")
+    ok, output = environment.dbt("run", "-s", "hive_table")
     assert ok, output
     assert output.startswith("unchanged"), output
 
 
-def test_governance_settings_round_trip(env):
-    schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{env.schema}"
-    env.sql(f"create tag if not exists {schema}.governance_tag")
-    env.sql(f"create masking policy if not exists {schema}.message_mask as (value string) returns string -> value")
-    env.sql(f"create row access policy if not exists {schema}.allow_all as (value int) returns boolean -> true")
-    env.put("governed/a.parquet", parquet([1, 2]))
+def test_governance_settings_round_trip(environment):
+    schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
+    environment.sql(f"create tag if not exists {schema}.governance_tag")
+    environment.sql(f"create masking policy if not exists {schema}.message_mask as (value string) returns string -> value")
+    environment.sql(f"create row access policy if not exists {schema}.allow_all as (value int) returns boolean -> true")
+    environment.put("governed/a.parquet", parquet([1, 2]))
     names = {
         "governed_table_enabled": True,
         "tag_name": f"{schema}.governance_tag",
         "masking_policy_name": f"{schema}.message_mask",
         "row_access_policy_name": f"{schema}.allow_all",
     }
-    ok, output = env.dbt("run", "-s", "governed_table", "--full-refresh", **names)
+    ok, output = environment.dbt("run", "-s", "governed_table", "--full-refresh", **names)
     assert ok, output
-    assert env.count("governed_table") == 2
+    assert environment.count("governed_table") == 2
 
-    ok, output = env.dbt("run", "-s", "governed_table", **names)
+    ok, output = environment.dbt("run", "-s", "governed_table", **names)
     assert ok, output
     assert output.startswith("unchanged"), "declared tags, policies, and constraints must read back as unchanged: " + output
 
-    ok, output = env.dbt("run", "-s", "governed_table", tag_value="v2", **names)
+    ok, output = environment.dbt("run", "-s", "governed_table", tag_value="v2", **names)
     assert ok, output
     assert output.startswith("altered"), output
-    ok, output = env.dbt("run", "-s", "governed_table", tag_value="v2", **names)
+    ok, output = environment.dbt("run", "-s", "governed_table", tag_value="v2", **names)
     assert ok, output
     assert output.startswith("unchanged"), output
 
 
 @pytest.mark.skipif(not os.environ.get("PARQUET_DIRECT_AUTO_REFRESH"), reason="needs S3 event notifications; set PARQUET_DIRECT_AUTO_REFRESH=1")
-def test_auto_refresh_backfills_existing_files(env):
-    env.put("auto/a.parquet", parquet([1, 2]))
-    ok, output = env.dbt("run", "-s", "auto_refresh_table", "--full-refresh", auto_refresh_table_enabled=True)
+def test_auto_refresh_backfills_existing_files(environment):
+    environment.put("auto/a.parquet", parquet([1, 2]))
+    ok, output = environment.dbt("run", "-s", "auto_refresh_table", "--full-refresh", auto_refresh_table_enabled=True)
     assert ok, output
     deadline = time.time() + 600
-    while env.count("auto_refresh_table") < 2 and time.time() < deadline:
+    while environment.count("auto_refresh_table") < 2 and time.time() < deadline:
         time.sleep(30)
-    assert env.count("auto_refresh_table") == 2
+    assert environment.count("auto_refresh_table") == 2
 
-    env.put("auto/broken.parquet", b"not parquet")
+    environment.put("auto/broken.parquet", b"not parquet")
     time.sleep(120)
-    ok, output = env.dbt("run", "-s", "auto_refresh_table", auto_refresh_table_enabled=True)
+    ok, output = environment.dbt("run", "-s", "auto_refresh_table", auto_refresh_table_enabled=True)
     assert not ok
     assert "broken.parquet" in output, output

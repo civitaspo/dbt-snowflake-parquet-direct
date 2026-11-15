@@ -11,7 +11,8 @@
   {%- endif -%}
   {%- set raw_options = (nodes[0].config.meta or {}).get('parquet_direct') -%}
   {%- set errors = package.parquet_direct__validate(raw_options) if raw_options is mapping else ['model ' ~ model ~ ' has no meta.parquet_direct'] -%}
-  {%- set hours = lookback_hours if lookback_hours is not none else (raw_options.get('registration_check') or {}).get('lookback_hours', 24) if raw_options is mapping else 24 -%}
+  {%- set check = raw_options.get('registration_check') if raw_options is mapping else none -%}
+  {%- set hours = lookback_hours if lookback_hours is not none else check.get('lookback_hours', 24) if check is mapping else 24 -%}
   {%- set lookback_error = package.parquet_direct__lookback_error(hours) -%}
   {%- if lookback_error -%}{%- do errors.append(lookback_error) -%}{%- endif -%}
   {%- if errors -%}

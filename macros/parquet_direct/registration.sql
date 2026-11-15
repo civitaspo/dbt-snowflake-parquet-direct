@@ -147,6 +147,18 @@
   {{ return(none if value is integer and value > 0 else 'lookback_hours must be a positive integer, got ' ~ value) }}
 {%- endmacro %}
 
+{# Errors in the arguments of the parquet_direct_registration test, checked before its SQL is built. #}
+{% macro parquet_direct__test_argument_errors(lookback_hours, ignore_file_patterns) -%}
+  {%- set errors = [] -%}
+  {%- do dbt_snowflake_parquet_direct.parquet_direct__check_string_list(errors, ignore_file_patterns, 'ignore_file_patterns') -%}
+  {%- if not errors -%}
+    {%- do errors.extend(dbt_snowflake_parquet_direct.parquet_direct__ignore_pattern_errors(ignore_file_patterns, 'ignore_file_patterns')) -%}
+  {%- endif -%}
+  {%- set lookback_error = dbt_snowflake_parquet_direct.parquet_direct__lookback_error(lookback_hours) -%}
+  {%- if lookback_error -%}{%- do errors.append(lookback_error) -%}{%- endif -%}
+  {{ return(errors) }}
+{%- endmacro %}
+
 {#
   The SQL of the parquet_direct_registration test: one row per skipped file in the window, plus one row when the
   auto refresh mode differs from `expect_auto_refresh` or auto refresh is on but not RUNNING.

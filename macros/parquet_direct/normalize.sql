@@ -43,9 +43,9 @@
   {%- endfor -%}
 
   {%- for constraint in declaration.get('constraints') or [] -%}
-    {%- set idents = [] -%}
-    {%- for name in constraint.columns -%}{%- do idents.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
-    {%- do constraints.append({'type': constraint.type, 'name': constraint.get('name'), 'columns': idents, 'rely': constraint.get('rely') == true, 'references': constraint.get('references')}) -%}
+    {%- set identifiers = [] -%}
+    {%- for name in constraint.columns -%}{%- do identifiers.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
+    {%- do constraints.append({'type': constraint.type, 'name': constraint.get('name'), 'columns': identifiers, 'rely': constraint.get('rely') == true, 'references': constraint.get('references')}) -%}
   {%- endfor -%}
 
   {%- set comment = declaration.get('comment') -%}
