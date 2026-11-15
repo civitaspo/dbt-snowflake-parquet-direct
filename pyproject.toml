@@ -9,3 +9,12 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+# Used only by integration_tests_snowflake/, which needs a Snowflake account and an S3 bucket.
+[dependency-groups]
+snowflake = [
+    "dbt-snowflake>=1.10",
+    "boto3>=1.35",
+    "pyarrow>=18",
+    "pytest>=8",
+]
