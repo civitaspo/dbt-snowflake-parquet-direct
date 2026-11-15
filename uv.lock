@@ -640,12 +640,12 @@ wheels = [
 name = "dbt-snowflake-parquet-direct-tests"
 version = "0.1.0"
 source = { virtual = "." }
-dependencies = [
+
+[package.dev-dependencies]
+dev = [
     { name = "dbt-core" },
     { name = "dbt-duckdb" },
 ]
-
-[package.dev-dependencies]
 snowflake = [
     { name = "boto3" },
     { name = "dbt-snowflake" },
@@ -655,12 +655,12 @@ snowflake = [
 ]
 
 [package.metadata]
-requires-dist = [
+
+[package.metadata.requires-dev]
+dev = [
     { name = "dbt-core", specifier = ">=1.12,<1.13" },
     { name = "dbt-duckdb", specifier = ">=1.11,<1.12" },
 ]
-
-[package.metadata.requires-dev]
 snowflake = [
     { name = "boto3", specifier = ">=1.35" },
     { name = "dbt-snowflake", specifier = ">=1.10" },
