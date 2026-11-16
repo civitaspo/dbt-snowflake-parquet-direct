@@ -220,6 +220,50 @@ def test_type_conflict_fails_the_refresh(environment):
     assert "incompatible" in output.lower(), output
 
 
+def flags(ids, values, value_type):
+    buffer = io.BytesIO()
+    pq.write_table(pa.table({"id": pa.array(ids, pa.int64()), "is_active": pa.array(values, value_type)}), buffer)
+    return buffer.getvalue()
+
+
+def test_previous_version_keeps_files_readable_after_a_type_change(environment):
+    environment.put("versioned/d=1/integer.parquet", flags([1, 2], [0, 1], pa.int64()))
+    ok, output = environment.dbt("run", "-s", "versioned_table", "--full-refresh")
+    assert ok, output
+    environment.put("versioned/d=2/boolean.parquet", flags([3, 4], [True, False], pa.bool_()))
+    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_paths=["d=2/"])
+    assert not ok
+    assert "incompatible" in output.lower(), output
+
+    previous = {"table": "versioned_table_before_boolean"}
+    converted = {**previous, "columns": {"is_active": "case is_active when 0 then false when 1 then true end"}}
+    common = {"is_active_type": "boolean", "refresh_on_create": False, "refresh_paths": ["d=2/"]}
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
+    assert not ok
+    rename = f"alter iceberg table {environment.table('versioned_table')} rename to {environment.table('"VERSIONED_TABLE_BEFORE_BOOLEAN"')}"
+    assert "R06" in output and rename.lower() in output.lower(), output
+    environment.sql(rename)
+
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[previous], **common)
+    assert not ok
+    assert "R09" in output and "IS_ACTIVE" in output, output
+    assert not environment.sql(f"show objects like 'VERSIONED_TABLE__CURRENT' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
+
+    for attempt in ("create", "rerun"):
+        ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
+        assert ok, f"{attempt}: {output}"
+    rows = environment.sql(f"select id, is_active, d from {environment.table('versioned_table')} order by id")
+    assert [(row["ID"], row["IS_ACTIVE"], row["D"]) for row in rows] == [(1, False, "1"), (2, True, "1"), (3, True, "2"), (4, False, "2")]
+    assert environment.sql(f"show views like 'VERSIONED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
+    described = {row["name"]: row["comment"] for row in environment.sql(f"desc view {environment.table('versioned_table')}")}
+    assert described["IS_ACTIVE"] == "whether the customer is active", described
+
+    ok, output = environment.dbt("test", "-s", "versioned_table", previous_versions=[converted], **common)
+    assert ok, output
+    ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[converted], **common)
+    assert ok, output
+
+
 def test_invalid_config_fails_before_any_sql(environment):
     ok, output = environment.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_base_location="no-trailing-slash")
     assert not ok

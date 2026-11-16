@@ -17,5 +17,7 @@
 {%- if errors -%}
   {{ exceptions.raise_compiler_error('parquet_direct_registration on ' ~ model ~ ':\n  - ' ~ errors | join('\n  - ')) }}
 {%- endif -%}
-{{ package.parquet_direct__registration_test_sql(model, lookback_hours, ignore_file_patterns, expected.value) }}
+{#- A model with previous versions registers files in its current table, not in its combined view. -#}
+{%- set relation = package.parquet_direct__registration_relation(model, graph.nodes.values()) if execute else model -%}
+{{ package.parquet_direct__registration_test_sql(relation, lookback_hours, ignore_file_patterns, expected.value) }}
 {% endtest %}

@@ -161,6 +161,7 @@ The materialization decides whether to add `OR REPLACE` or `IF NOT EXISTS`, so c
 | `refresh_paths` | list[string] | Empty | With `auto_refresh: false`, the refresh paths to refresh on every run, including the run that creates the table. `var()` can supply dates. When empty, `skip_refresh_if_refresh_paths_empty` decides. |
 | `skip_refresh_if_refresh_paths_empty` | bool | TRUE | With `auto_refresh: false` and empty `refresh_paths`: TRUE skips the manual refresh, FALSE refreshes the whole base location. Also applies right after creation. |
 | `registration_check` | object | Section 7 | Checks for skipped files and auto refresh health |
+| `previous_versions` | list[object] | Empty | Tables that hold files written before an incompatible type change, combined with the current table in a view (section 8) |
 
 ## 4. Column definitions
 
@@ -233,7 +234,7 @@ A manual refresh cannot run inside a transaction, so the materialization does no
 
 ### Adjustments at creation
 
-When `refresh_on_create: false` and `auto_refresh: true` are set together, the materialization creates the table with `AUTO_REFRESH = FALSE` and then issues `ALTER ... SET AUTO_REFRESH = TRUE`. Snowflake recommends this sequence for large tables because it registers existing files through an asynchronous backfill. It works whether or not creating with `AUTO_REFRESH = TRUE` directly would also backfill, which is still unverified (section 10).
+When `refresh_on_create: false` and `auto_refresh: true` are set together, the materialization creates the table with `AUTO_REFRESH = FALSE` and then issues `ALTER ... SET AUTO_REFRESH = TRUE`. Snowflake recommends this sequence for large tables because it registers existing files through an asynchronous backfill. It works whether or not creating with `AUTO_REFRESH = TRUE` directly would also backfill, which is still unverified (section 11).
 
 With `refresh_on_create: false`, a re-created table holds only the files under `refresh_paths` right after re-creation. If `refresh_paths` lists only a date path, older files are not registered. Under auto refresh, only part of the data is visible until the backfill finishes. The run logs a warning in this case.
 
@@ -264,6 +265,8 @@ Validation runs in three stages. Each stage collects every violation before fail
 | S13 | `registration_check.lookback_hours` with `auto_refresh: false` | Manual refresh does not use it. |
 | S14 | The compiled model body contains anything besides comments (`config()` renders to nothing) | The body is not used. |
 | S15 | Unsupported dbt configuration: `cluster_by`, `unique_key`, `incremental_strategy`, or `contract.enforced: true` | It has no effect or is unsupported on Parquet Direct. `transient` is not checked, because projects often set it for every model. |
+| S16 | `previous_versions` without `columns`, a table listed twice, or an expression for an undeclared column | The combined view exposes the declared columns. |
+| S17 | `previous_versions` with `auto_refresh: true` | Auto refresh next to a previous version's files is not verified. |
 
 Prefix matching of refresh paths is documented Snowflake behavior, so a refresh path without a trailing `/` is allowed. The README explains the prefix behavior.
 
@@ -273,8 +276,13 @@ Prefix matching of refresh paths is documented Snowflake behavior, so a refresh 
 | --- | --- | --- |
 | R01 | The catalog integration does not exist, or it is not `CATALOG_SOURCE = OBJECT_STORE` with `TABLE_FORMAT` `NONE` or `HIVE` | Object storage integrations also serve Delta and Iceberg metadata, which are not Parquet Direct. |
 | R02 | `TABLE_FORMAT = HIVE` with `partition_columns` | Snowflake rejects it. |
-| R03 | An object with the same name is a table or view that is not a Parquet Direct table | Never replace an unrelated object. |
+| R03 | An object with the same name is a table or view that is not a Parquet Direct table | Never replace an unrelated object. A combined view left after removing `previous_versions` also stops here. |
 | R04 | `--full-refresh` re-creates an existing table with `refresh_on_create: false` | Warning: only the files under `refresh_paths` are registered. |
+| R05 | A previous version is the model's own name or its current table | They would read themselves. |
+| R06 | A previous version table does not exist | The error prints the `RENAME` statement for the table that holds its files: the model's table, else the current table. |
+| R07 | The model's name is still a table although every previous version exists | The combined view needs the name. |
+| R08 | The current table is created with `refresh_on_create: true` while a previous version's base location overlaps its own | Creation would register the old files, and Snowflake rejects their type. |
+| R09 | A previous version's column has neither the declared type, a widening of it, nor an expression | Converting types needs a decision only the user can make. |
 
 ### Stage 3: differences from the existing table
 
@@ -372,7 +380,47 @@ A table under auto refresh rarely needs `dbt run` after creation. The same check
 - Both entry points require `lookback_hours` to be a positive integer.
 - `dbt run-operation parquet_direct_check_registration --args '{model: sales}'` serves one-off investigation.
 
-## 8. Operational features
+## 8. Previous versions
+
+Some type changes cannot be applied to a Parquet Direct table, such as a decimal scale change or an integer becoming a boolean. Files written after such a change fail to register (appendix: type widening and conflicts), and re-creation does not help, because the files written before the change keep the old type. `previous_versions` keeps both readable under the model's name. Incompatible changes are rare, so a model without them stays a single table, and the view appears only when a model declares a previous version.
+
+```yaml
+columns:
+  - name: is_active
+    data_type: boolean
+refresh_on_create: false
+refresh_paths: ["d={{ var('ds') }}/"]
+previous_versions:                       # oldest first
+  - table: customers_before_boolean
+    columns:
+      is_active: "case is_active when 0 then false when 1 then true end"
+```
+
+| Object | Name | Built by |
+| --- | --- | --- |
+| Combined view | The model's name | The package, on every run |
+| Current table | `<model>__current` | The package, like a model without previous versions |
+| Previous version | `previous_versions[].table`, in the model's schema | The user, by renaming the table that read the old files |
+
+### Moving to a previous version
+
+1. A run fails because files with the new type do not register.
+2. The user declares the new type, adds the previous version with expressions for the changed columns, and runs. The run stops with R06 and prints the `ALTER ICEBERG TABLE ... RENAME TO ...` statement. The package never renames an object that consumers may query; the user decides when the name moves.
+3. The user runs the statement. The next run creates the current table, builds the combined view, refreshes `refresh_paths`, and checks registration.
+
+A later incompatible change repeats the steps with the current table as the table to rename, and the new previous version is listed last.
+
+### The combined view
+
+- Its columns are the declared columns, in order. For each previous version, a declared column comes from its expression, else from the same-named column if that column has the declared type or a widening of it, else NULL when the table lacks it. Any other type stops the run with R09 instead of relying on an implicit conversion, because only the user knows whether `0` means `false`.
+- Each previous version's `SELECT` casts every column to its declared type, and `UNION ALL BY NAME` combines them with the current table. Each `SELECT` is compiled with `EXPLAIN` before anything is created, so a wrong expression fails first.
+- Masking policies, row access policies, tags, and comments declared on the model are part of the `CREATE OR REPLACE VIEW ... COPY GRANTS` statement. Policies set with `ALTER` are dropped when a view is replaced, while policies in the statement and copied grants survive (appendix: verification on 2026-11-16), so the view is never unprotected. A masking policy's signature has the declared type, which matches the view and not necessarily a previous version.
+- The current table gets the constraints only. Previous versions keep what they had before the rename. dbt `grants` apply to the view, which reads the tables with its owner's privileges.
+- The registration check, the generic test, and the run-operation read the current table. Previous versions are never refreshed or altered.
+- The current table may share the base location of a previous version only with `refresh_on_create: false` (R08) and refresh paths that hold new files: a refresh without a path fails on the old files.
+- Removing `previous_versions` is not supported. The view stays, and R03 stops the run.
+
+## 9. Operational features
 
 The first release (P0) prevents unintended re-creation and unnoticed skipped files. Features that matter once operations start come in P1 and later.
 
@@ -388,7 +436,7 @@ The first release (P0) prevents unintended re-creation and unnoticed skipped fil
 | P1 | Staged initial registration of large tables: create with `refresh_on_create: false` and refresh path by path through a run-operation | Long or timed-out creation |
 | P2 | Reconciliation with expected files: compare a file list from the writer with `ICEBERG_TABLE_FILES` | Missing registrations from lost notifications, which never show as `SKIPPED` |
 | P2 | Event table integration: read `parquet_direct_file_ingestion_failure` | Monitoring beyond the history retention. Requires a request to Snowflake Support. |
-| P2 | Migration guide for incompatible schema changes: create a table for the new type and combine both with a `UNION ALL` view | Type changes that re-creation cannot solve, such as a decimal scale change or integer to string |
+| P0 | Previous versions (section 8): keep files written before an incompatible type change readable through a combined view | Type changes that re-creation cannot solve, such as a decimal scale change or integer to boolean |
 
 The README also states what the package cannot prevent:
 
@@ -396,7 +444,7 @@ The README also states what the package cannot prevent:
 - With `match_by_column_name: case_sensitive`, a file whose column spelling differs from the established mapping fails to register, and unquoted column names (stored upper-case) do not match lower-case Parquet columns. Use `quote: true` on such columns.
 - A change to a create-time option takes effect only on the next full refresh.
 
-## 9. Rejected alternatives
+## 10. Rejected alternatives
 
 | Alternative | Why it was rejected |
 | --- | --- |
@@ -409,9 +457,13 @@ The README also states what the package cannot prevent:
 | Re-applying `MATCH_BY_COLUMN_NAME` with `ALTER` on every run | It would work, but it would treat one unreadable option differently from the rest. All unreadable options behave the same way as create-time options. |
 | `on_configuration_change: continue` still failing on re-creation-required changes | `continue` is an explicit escape hatch for incidents. It warns on every difference instead. |
 | `on_skipped: warn` as the default | A skipped file is missing data. Failing by default matches the fail-first principle. |
+| Previous versions as plain dbt models and a hand-written view | It leaves the table, the view, and their consistency to each project, and the model no longer shows which tables hold its history. |
+| Switching to a combined view automatically when a type change is detected | Type detection does not say how old values map to the new type, such as `0` and `1` to booleans. |
+| Renaming the model's table automatically | Consumers query that name. The user runs the printed statement, so the name moves only when they decide. |
+| Applying the view's policies with `ALTER` after `CREATE OR REPLACE VIEW` | Replacing the view drops them, so the view would be unprotected between the statements. |
 | `COMMENT` only from `persist_docs` | `comment` mirrors the DDL. It takes precedence, and `persist_docs` remains the fallback. |
 
-## 10. Open verification
+## 11. Open verification
 
 A verification on 2026-11-15 settled the readable table state, the alterability of each option, the history function, nonexistent refresh paths, `COPY GRANTS`, and the absence of an `ACCOUNT_USAGE` history view. The [appendix](#verification-on-2026-11-15) records the results. The integration tests in `integration_tests_snowflake/` passed on 2026-11-15 for every scenario except auto refresh, so changes during Public Preview are caught by rerunning them.
 
@@ -802,3 +854,21 @@ Snowflake stores virtual column expressions in its own form. `DESC ICEBERG TABLE
 A column declared without `not_null` but covered by a `PRIMARY KEY` was reported with `null? = N`.
 
 After both fixes, 14 scenarios passed and the auto refresh scenario was skipped, in 93 seconds. A broken file registered by manual refresh appeared as `SKIPPED`. Re-applying an unchanged masking policy with `SET MASKING POLICY ... FORCE` succeeded, and declared tags, policies, and constraints read back as unchanged.
+
+### Verification on 2026-11-16
+
+These probes shaped section 8. One table read integer files under `d=2026-11-01/`, and a boolean file arrived under `d=2026-11-02/`.
+
+| Operation | Result |
+| --- | --- |
+| `REFRESH 'd=2026-11-02/'` on the integer table | Failed with 100496, `Parquet file schema data type is incompatible with table column` |
+| `ALTER ICEBERG TABLE ... RENAME TO ...` | Succeeded; the renamed table still read its files and kept its history |
+| `CREATE ICEBERG TABLE` with the boolean type, the same base location, and `REFRESH_ON_CREATE = FALSE` | Succeeded with no rows |
+| `REFRESH 'd=2026-11-02/'` on that table | Registered only the boolean file |
+| `REFRESH` without a path on that table | Failed with 100496 on the integer file |
+| `CREATE ICEBERG TABLE` with the boolean type and the default `REFRESH_ON_CREATE` | Failed with 100496 on the integer file |
+| `UNION ALL BY NAME` | Matches columns by name and fills missing ones with NULL; a `NUMBER` and a `BOOLEAN` column fail with 001790 |
+| `CREATE OR REPLACE VIEW` over a table's name | Failed with 001998 |
+| `CREATE OR REPLACE VIEW ... COPY GRANTS` after `ALTER VIEW ... SET MASKING POLICY` | The masking policy was gone |
+| `CREATE OR REPLACE VIEW ... COPY GRANTS (col WITH MASKING POLICY ... WITH TAG (...)) WITH ROW ACCESS POLICY ... WITH TAG (...)`, replaced again | Policies, tags, and grants were all kept |
+

@@ -140,6 +140,7 @@ Set these directly under `config`.
 | `refresh_paths` | list of strings | Empty | With `auto_refresh: false`, paths relative to `base_location` to refresh on every run, including the run that creates the table. A path is a prefix; end directories with `/`. | Not compared |
 | `skip_refresh_if_refresh_paths_empty` | boolean | `true` | With `auto_refresh: false` and empty `refresh_paths`: `true` skips the refresh, `false` refreshes the whole `base_location`. | Not compared |
 | `registration_check` | mapping | See [Registration check](#registration-check) | How skipped files and auto refresh health are reported. | Not compared |
+| `previous_versions` | list | Empty | Tables that hold files written before an incompatible type change, oldest first. The model becomes a view over them and its current table, see [Previous versions](#previous-versions). | Not compared |
 
 `row_access_policy` takes:
 
@@ -188,6 +189,25 @@ Constraints are not enforced by Snowflake. When the model declares constraints, 
 | `columns` | non-empty list of column names | Required | The constrained columns. |
 | `rely` | boolean | `false` | `RELY`. |
 | `references` | mapping | Required for `foreign_key` only | `table` as `database.schema.table` and `columns`, a non-empty list. |
+
+### Previous versions
+
+Each entry of `previous_versions` takes:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `table` | string | A table in the model's schema, without database or schema. A quoted name keeps its case. |
+| `columns` | mapping of column name to SQL expression | How the table's columns produce a declared column, such as `case is_active when 0 then false when 1 then true end`. A declared column without an expression reads the same-named column, which must have the declared type or a narrower `NUMBER` with the same scale, or is NULL when the table lacks it. |
+
+With `previous_versions`, the model's name is a view that combines each previous version and the current table `<model>__current` with `UNION ALL BY NAME`. Masking policies, row access policies, tags, and comments are set on the view; constraints on the current table. dbt `grants` apply to the view. Registration checks read the current table, and previous versions are never refreshed or altered. `auto_refresh: true` is not supported with previous versions.
+
+When files stop registering because of an incompatible type change:
+
+1. Declare the new type in `columns`, add the old table name to `previous_versions` with expressions for the changed columns, and run. If the new files share `base_location` with the old table, set `refresh_on_create: false` and refresh only the new paths with `refresh_paths`; a refresh of the whole location would fail on the old files.
+2. The run stops before changing anything and prints the `ALTER ICEBERG TABLE ... RENAME TO ...` statement for the table that holds the old files: the model's table the first time, `<model>__current` later. Run it.
+3. Run again. The package creates `<model>__current`, builds the view, refreshes, and checks registration.
+
+Grants made outside dbt stay with the renamed table. Removing `previous_versions` later is not supported.
 
 ### Registration check
 

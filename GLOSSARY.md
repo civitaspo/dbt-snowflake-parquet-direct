@@ -65,3 +65,17 @@ _Avoid_: Immutable option, static option
 **Re-creation**:
 Replacing a Parquet Direct table with `CREATE OR REPLACE`, which happens only on a dbt full refresh.
 _Avoid_: Rebuild, recreate
+
+## Previous versions
+
+**Previous version**:
+A table that holds the files written before an incompatible type change, read through a combined view and never registered again.
+_Avoid_: Old table, archive, generation
+
+**Current table**:
+The Parquet Direct table that registers new files for a model with previous versions.
+_Avoid_: Latest table, live table
+
+**Combined view**:
+The view, under the model's name, that maps every previous version and the current table onto the declared columns.
+_Avoid_: Union view, public view

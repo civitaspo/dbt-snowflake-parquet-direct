@@ -48,6 +48,18 @@
     {%- do constraints.append({'type': constraint.type, 'name': constraint.get('name'), 'columns': identifiers, 'rely': constraint.get('rely') == true, 'references': constraint.get('references')}) -%}
   {%- endfor -%}
 
+  {#- Expressions are keyed by the identifier of the declared column they produce. -#}
+  {%- set previous_versions = [] -%}
+  {%- for version in declaration.get('previous_versions') or [] -%}
+    {%- set expressions = {} -%}
+    {%- for name, expression in (version.get('columns') or {}).items() -%}
+      {%- for column in columns if column.name | upper == name | replace('"', '') | upper -%}
+        {%- do expressions.update({column.identifier: expression}) -%}
+      {%- endfor -%}
+    {%- endfor -%}
+    {%- do previous_versions.append({'table': version.table, 'identifier': dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(version.table), 'columns': expressions}) -%}
+  {%- endfor -%}
+
   {%- set comment = declaration.get('comment') -%}
   {%- if comment is none and persist_relation and model_description -%}
     {%- set comment = model_description -%}
@@ -72,6 +84,7 @@
     'schema_inference': inference if inference is not none else (data_columns | length == 0 or evolution),
     'schema_evolution': evolution,
     'refresh_paths': declaration.get('refresh_paths') or [],
+    'previous_versions': previous_versions,
     'skip_refresh_if_refresh_paths_empty': declaration.get('skip_refresh_if_refresh_paths_empty') != false,
     'registration_check': {
       'on_skipped': check.get('on_skipped', 'error'),
