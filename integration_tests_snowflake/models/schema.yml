@@ -1,0 +1,12 @@
+models:
+  - name: manual_table
+    data_tests:
+      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+          arguments:
+            lookback_hours: 1
+      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+          arguments:
+            lookback_hours: 1
+            ignore_file_patterns: ['/broken[.]parquet$']
+          config:
+            tags: [ignore_check]
