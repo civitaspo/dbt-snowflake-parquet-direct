@@ -226,6 +226,8 @@ Each run goes through static validation, pre-flight checks, creation or reconcil
     - `apply` (default): If any re-creation-required change exists, fail without issuing any `ALTER`. Otherwise issue the `ALTER` statements.
     - `continue`: Issue nothing and fail on nothing. Log every difference as a warning and move on. Meant for temporary use during incidents.
     - `fail`: Fail on any difference.
+
+    With previous versions, differences of the combined view count as well (section 8).
 6. **Refresh**: With `auto_refresh: false`, issue `ALTER ICEBERG TABLE ... REFRESH '<path>'` for each refresh path in order. With `auto_refresh: true`, issue no manual refresh. This step also runs right after creation and re-creation. When `refresh_paths` is empty, `skip_refresh_if_refresh_paths_empty` (default TRUE) decides.
 7. **Registration checks**: Check registration history for skipped files and check auto refresh health (section 7).
 8. **Post-processing**: Record a summary in the log and in `run_results.json`: files registered, unregistered, and skipped. Grants are applied earlier, right after creation or reconciliation, so a refresh or registration failure never leaves a new table without them.
@@ -281,8 +283,9 @@ Prefix matching of refresh paths is documented Snowflake behavior, so a refresh 
 | R05 | A previous version is the model's own name or its current table | They would read themselves. |
 | R06 | A previous version table does not exist | The error prints the `RENAME` statement for the table that holds its files: the model's table, else the current table. |
 | R07 | The model's name is still a table although every previous version exists | The combined view needs the name. |
-| R08 | The current table is created with `refresh_on_create: true` while a previous version's base location overlaps its own | Creation would register the old files, and Snowflake rejects their type. |
+| R08 | A previous version's base location overlaps the current table's, and a refresh would read every file: creation with `refresh_on_create: true`, or empty `refresh_paths` with `skip_refresh_if_refresh_paths_empty: false` | Snowflake rejects the old files' type and fails the whole refresh. |
 | R09 | A previous version's column has neither the declared type, a widening of it, nor an expression | Converting types needs a decision only the user can make. |
+| R10 | A view under the model's name does not read the current table | Never change a view that previous versions did not create. |
 
 ### Stage 3: differences from the existing table
 
@@ -398,7 +401,7 @@ previous_versions:                       # oldest first
 
 | Object | Name | Built by |
 | --- | --- | --- |
-| Combined view | The model's name | The package, on every run |
+| Combined view | The model's name | The package; changed in place when the declaration differs |
 | Current table | `<model>__current` | The package, like a model without previous versions |
 | Previous version | `previous_versions[].table`, in the model's schema | The user, by renaming the table that read the old files |
 
@@ -414,10 +417,15 @@ A later incompatible change repeats the steps with the current table as the tabl
 
 - Its columns are the declared columns, in order. For each previous version, a declared column comes from its expression, else from the same-named column if that column has the declared type or a widening of it, else NULL when the table lacks it. Any other type stops the run with R09 instead of relying on an implicit conversion, because only the user knows whether `0` means `false`.
 - Each previous version's `SELECT` casts every column to its declared type, and `UNION ALL BY NAME` combines them with the current table. Each `SELECT` is compiled with `EXPLAIN` before anything is created, so a wrong expression fails first.
-- Masking policies, row access policies, tags, and comments declared on the model are part of the `CREATE OR REPLACE VIEW ... COPY GRANTS` statement. Policies set with `ALTER` are dropped when a view is replaced, while policies in the statement and copied grants survive (appendix: verification on 2026-11-16), so the view is never unprotected. A masking policy's signature has the declared type, which matches the view and not necessarily a previous version.
+- A new view is created with the declared masking policies, row access policy, tags, and comments in its `CREATE VIEW` statement, so it is never readable without them. A masking policy's signature has the declared type, which matches the view and not necessarily a previous version.
+- An existing view is changed in place, never replaced. `CREATE OR ALTER VIEW` runs when the query, the declared comment, or a declared column comment differs; `ALTER VIEW` sets declared policies and tags that differ, compared as for tables (section 6). `CREATE OR ALTER VIEW` keeps grants and the policies and tags set outside dbt, but it cannot set policies or tags, and it removes comments that the statement omits (appendix: verification on 2026-11-16). A column added to an existing view is therefore masked by the `ALTER VIEW` right after it, because a policy needs an existing column.
+- Snowflake keeps the earlier text when `CREATE OR ALTER VIEW` changes nothing, so the stored text may still be the `CREATE VIEW` statement. Only the query at the end of the text is compared, after a trailing comment such as an appended dbt query comment is removed.
+- The view's differences follow `on_configuration_change` together with the current table's: `fail` stops, `continue` warns and applies neither. `--full-refresh` applies them.
+- A view under the model's name that does not read the current table stops the run with R10, so an unrelated view is never changed.
+- Snowflake cannot read a stream on the view, because change tracking does not support `UNION ALL BY NAME` (091926).
 - The current table gets the constraints only. Previous versions keep what they had before the rename. dbt `grants` apply to the view, which reads the tables with its owner's privileges.
 - The registration check, the generic test, and the run-operation read the current table. Previous versions are never refreshed or altered.
-- The current table may share the base location of a previous version only with `refresh_on_create: false` (R08) and refresh paths that hold new files: a refresh without a path fails on the old files.
+- The current table may share the base location of a previous version only when no refresh reads every file (R08): `refresh_on_create: false`, and either `refresh_paths` or `skip_refresh_if_refresh_paths_empty: true`. The refresh paths must hold only new files.
 - Removing `previous_versions` is not supported. The view stays, and R03 stops the run.
 
 ## 9. Operational features
@@ -460,7 +468,8 @@ The README also states what the package cannot prevent:
 | Previous versions as plain dbt models and a hand-written view | It leaves the table, the view, and their consistency to each project, and the model no longer shows which tables hold its history. |
 | Switching to a combined view automatically when a type change is detected | Type detection does not say how old values map to the new type, such as `0` and `1` to booleans. |
 | Renaming the model's table automatically | Consumers query that name. The user runs the printed statement, so the name moves only when they decide. |
-| Applying the view's policies with `ALTER` after `CREATE OR REPLACE VIEW` | Replacing the view drops them, so the view would be unprotected between the statements. |
+| Replacing the view with `CREATE OR REPLACE VIEW ... COPY GRANTS` on every run | It drops policies and tags set outside dbt, and it changes a view whose declaration did not change. |
+| Comparing the view's whole stored text | A `CREATE OR ALTER VIEW` that changes nothing keeps the earlier text, so the text would never match and every run would report a change. |
 | `COMMENT` only from `persist_docs` | `comment` mirrors the DDL. It takes precedence, and `persist_docs` remains the fallback. |
 
 ## 11. Open verification
@@ -871,4 +880,11 @@ These probes shaped section 8. One table read integer files under `d=2026-11-01/
 | `CREATE OR REPLACE VIEW` over a table's name | Failed with 001998 |
 | `CREATE OR REPLACE VIEW ... COPY GRANTS` after `ALTER VIEW ... SET MASKING POLICY` | The masking policy was gone |
 | `CREATE OR REPLACE VIEW ... COPY GRANTS (col WITH MASKING POLICY ... WITH TAG (...)) WITH ROW ACCESS POLICY ... WITH TAG (...)`, replaced again | Policies, tags, and grants were all kept |
+| `CREATE OR ALTER VIEW` with a policy or tag in the statement | Failed with 001506, `CREATE OR ALTER does not support setting policies or tags`, also for a new view |
+| `CREATE OR ALTER VIEW` with a changed query, an added column, and `UNION ALL BY NAME`, after `ALTER VIEW` set a masking policy, a row access policy, tags, and a grant | The query changed; the policies, tags, and grant were all kept |
+| `CREATE OR ALTER VIEW` without a column's `COMMENT` | The column comment was removed |
+| `CREATE OR ALTER VIEW` with the definition the view already has | Nothing changed, and `SHOW VIEWS` still returned the earlier `CREATE VIEW` text |
+| `SHOW VIEWS` text after a statement with a leading or trailing comment | The leading comment was dropped; the trailing comment was kept |
+| A stream on a view, read after `CREATE OR ALTER VIEW` changed its query | The stream still read; after the query used `UNION ALL BY NAME`, it failed with 091926 |
+| A stream on a view, read after `CREATE OR REPLACE VIEW` | Failed: the base view was dropped |
 

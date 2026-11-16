@@ -249,9 +249,10 @@ def test_previous_version_keeps_files_readable_after_a_type_change(environment):
     assert "R09" in output and "IS_ACTIVE" in output, output
     assert not environment.sql(f"show objects like 'VERSIONED_TABLE__CURRENT' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
 
-    for attempt in ("create", "rerun"):
-        ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
-        assert ok, f"{attempt}: {output}"
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
+    assert ok, output
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], on_configuration_change="fail", **common)
+    assert ok and output.startswith("unchanged"), "the stored view definition must read back as unchanged: " + output
     rows = environment.sql(f"select id, is_active, d from {environment.table('versioned_table')} order by id")
     assert [(row["ID"], row["IS_ACTIVE"], row["D"]) for row in rows] == [(1, False, "1"), (2, True, "1"), (3, True, "2"), (4, False, "2")]
     assert environment.sql(f"show views like 'VERSIONED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
@@ -260,6 +261,19 @@ def test_previous_version_keeps_files_readable_after_a_type_change(environment):
 
     ok, output = environment.dbt("test", "-s", "versioned_table", previous_versions=[converted], **common)
     assert ok, output
+
+    schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
+    environment.sql(f"create masking policy if not exists {schema}.flag_mask as (value boolean) returns boolean -> value")
+    environment.sql(f"alter view {environment.table('versioned_table')} modify column is_active set masking policy {schema}.flag_mask")
+    inverted = {**previous, "columns": {"is_active": "is_active = 0"}}
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="fail", **common)
+    assert not ok and "view definition changed" in output, output
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], **common)
+    assert ok and output.startswith("altered"), output
+    rows = environment.sql(f"select id, is_active from {environment.table('versioned_table')} where d = '1' order by id")
+    assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [(1, True), (2, False)], rows
+    policies = environment.sql(f"select policy_name from table({os.environ['SNOWFLAKE_DATABASE']}.information_schema.policy_references(ref_entity_name => '{environment.table('versioned_table')}', ref_entity_domain => 'view'))")
+    assert [row["POLICY_NAME"] for row in policies] == ["FLAG_MASK"], "a policy set outside the model must survive a view change"
     ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[converted], **common)
     assert ok, output
 

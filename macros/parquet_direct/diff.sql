@@ -164,24 +164,9 @@
   {%- if declaration.comment is not none and declaration.comment != (state.comment or '') -%}
     {%- do changes.append({'key': 'comment', 'description': 'comment changed', 'alterable': true, 'statements': [alter ~ ' set comment = ' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(declaration.comment)]}) -%}
   {%- endif -%}
-  {%- set row_access_policy = declaration.row_access_policy -%}
-  {%- if row_access_policy -%}
-    {%- set on = [] -%}
-    {%- for name in row_access_policy.on -%}{%- do on.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
-    {%- set current = state.row_access_policy -%}
-    {%- if not current or current.name != dbt_snowflake_parquet_direct.parquet_direct__qualify(row_access_policy.name) or current.on != on -%}
-      {%- set add = 'add row access policy ' ~ row_access_policy.name ~ ' on (' ~ row_access_policy.on | join(', ') ~ ')' -%}
-      {%- set statement = alter ~ ' ' ~ ('drop row access policy ' ~ current.name ~ ', ' if current else '') ~ add -%}
-      {%- do changes.append({'key': 'row_access_policy', 'description': 'row_access_policy: ' ~ (current.name if current else 'none') ~ ' -> ' ~ row_access_policy.name, 'alterable': true, 'statements': [statement]}) -%}
-    {%- endif -%}
-  {%- endif -%}
-  {%- set tags = {} -%}
-  {%- for name, value in declaration.tag | dictsort if (state.table_tags or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
-    {%- do tags.update({name: value}) -%}
-  {%- endfor -%}
-  {%- if tags -%}
-    {%- do changes.append({'key': 'tag', 'description': 'tag: ' ~ tags.keys() | join(', '), 'alterable': true, 'statements': [alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(tags)]}) -%}
-  {%- endif -%}
+  {%- set governance = dbt_snowflake_parquet_direct.parquet_direct__governance_changes(alter, declaration, state) -%}
+  {%- do changes.extend(governance.changes) -%}
+  {%- do reapply.extend(governance.reapply) -%}
 
   {%- set actual_columns = {} -%}
   {%- for column in state.columns or [] -%}{%- do actual_columns.update({column.name: column}) -%}{%- endfor -%}
@@ -218,25 +203,6 @@
       {%- endif -%}
       {%- if column.comment is not none and column.comment != (actual.comment or '') -%}
         {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' comment changed', 'alterable': true, 'statements': [column_alter ~ ' comment ' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(column.comment)]}) -%}
-      {%- endif -%}
-      {%- set policy = column.masking_policy -%}
-      {%- if policy -%}
-        {%- set using = ' using (' ~ policy.using | join(', ') ~ ')' if policy.using else '' -%}
-        {#- FORCE replaces an existing policy in one statement, so the column is never unmasked in between. -#}
-        {%- set statement = column_alter ~ ' set masking policy ' ~ policy.name ~ using ~ ' force' -%}
-        {%- if (state.masking_policies or {}).get(column.identifier) != dbt_snowflake_parquet_direct.parquet_direct__qualify(policy.name) -%}
-          {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' masking_policy -> ' ~ policy.name, 'alterable': true, 'statements': [statement]}) -%}
-        {%- else -%}
-          {#- POLICY_REFERENCES reports no USING columns for masking policies, so adding, changing, or removing using is invisible; re-apply instead. -#}
-          {%- do reapply.append(statement) -%}
-        {%- endif -%}
-      {%- endif -%}
-      {%- set column_tags = {} -%}
-      {%- for name, value in column.tag | dictsort if ((state.column_tags or {}).get(column.identifier) or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
-        {%- do column_tags.update({name: value}) -%}
-      {%- endfor -%}
-      {%- if column_tags -%}
-        {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' tag: ' ~ column_tags.keys() | join(', '), 'alterable': true, 'statements': [column_alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(column_tags)]}) -%}
       {%- endif -%}
     {%- endif -%}
   {%- endfor -%}
@@ -279,6 +245,57 @@
   {%- endif -%}
 
   {{ return({'changes': changes, 'notes': notes, 'reapply': reapply}) }}
+{%- endmacro %}
+
+{#
+  Changes to the masking policies, row access policy, and tags that `declaration` declares, as ALTER statements that
+  start with `alter` (`alter iceberg table <name>` or `alter view <name>`). Undeclared ones are left as they are.
+  `details` holds what parquet_direct__get_governance read.
+#}
+{% macro parquet_direct__governance_changes(alter, declaration, details) -%}
+  {%- set changes = [] -%}
+  {%- set reapply = [] -%}
+  {%- set row_access_policy = declaration.row_access_policy -%}
+  {%- if row_access_policy -%}
+    {%- set on = [] -%}
+    {%- for name in row_access_policy.on -%}{%- do on.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
+    {%- set current = details.row_access_policy -%}
+    {%- if not current or current.name != dbt_snowflake_parquet_direct.parquet_direct__qualify(row_access_policy.name) or current.on != on -%}
+      {%- set add = 'add row access policy ' ~ row_access_policy.name ~ ' on (' ~ row_access_policy.on | join(', ') ~ ')' -%}
+      {%- set statement = alter ~ ' ' ~ ('drop row access policy ' ~ current.name ~ ', ' if current else '') ~ add -%}
+      {%- do changes.append({'key': 'row_access_policy', 'description': 'row_access_policy: ' ~ (current.name if current else 'none') ~ ' -> ' ~ row_access_policy.name, 'alterable': true, 'statements': [statement]}) -%}
+    {%- endif -%}
+  {%- endif -%}
+  {%- set tags = {} -%}
+  {%- for name, value in declaration.tag | dictsort if (details.table_tags or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
+    {%- do tags.update({name: value}) -%}
+  {%- endfor -%}
+  {%- if tags -%}
+    {%- do changes.append({'key': 'tag', 'description': 'tag: ' ~ tags.keys() | join(', '), 'alterable': true, 'statements': [alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(tags)]}) -%}
+  {%- endif -%}
+  {%- for column in declaration.columns -%}
+    {%- set column_alter = alter ~ ' alter column ' ~ column.sql -%}
+    {%- set policy = column.masking_policy -%}
+    {%- if policy -%}
+      {%- set using = ' using (' ~ policy.using | join(', ') ~ ')' if policy.using else '' -%}
+      {#- FORCE replaces an existing policy in one statement, so the column is never unmasked in between. -#}
+      {%- set statement = column_alter ~ ' set masking policy ' ~ policy.name ~ using ~ ' force' -%}
+      {%- if (details.masking_policies or {}).get(column.identifier) != dbt_snowflake_parquet_direct.parquet_direct__qualify(policy.name) -%}
+        {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' masking_policy -> ' ~ policy.name, 'alterable': true, 'statements': [statement]}) -%}
+      {%- else -%}
+        {#- POLICY_REFERENCES reports no USING columns for masking policies, so adding, changing, or removing using is invisible; re-apply instead. -#}
+        {%- do reapply.append(statement) -%}
+      {%- endif -%}
+    {%- endif -%}
+    {%- set column_tags = {} -%}
+    {%- for name, value in column.tag | dictsort if ((details.column_tags or {}).get(column.identifier) or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
+      {%- do column_tags.update({name: value}) -%}
+    {%- endfor -%}
+    {%- if column_tags -%}
+      {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' tag: ' ~ column_tags.keys() | join(', '), 'alterable': true, 'statements': [column_alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(column_tags)]}) -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{ return({'changes': changes, 'reapply': reapply}) }}
 {%- endmacro %}
 
 {# The error raised when ALTER cannot apply the declaration (design section 6, stage 3). #}

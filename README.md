@@ -201,9 +201,11 @@ Each entry of `previous_versions` takes:
 
 With `previous_versions`, the model's name is a view that combines each previous version and the current table `<model>__current` with `UNION ALL BY NAME`. Masking policies, row access policies, tags, and comments are set on the view; constraints on the current table. dbt `grants` apply to the view. Registration checks read the current table, and previous versions are never refreshed or altered. `auto_refresh: true` is not supported with previous versions.
 
+The view is changed in place with `CREATE OR ALTER VIEW` and `ALTER VIEW` when its query or its declared comments, policies, or tags differ, and `on_configuration_change` applies to these changes as to the table's. Declared masking policies are re-applied on every run, as on tables. Grants, policies, and tags set outside dbt stay. A comment set outside dbt is removed when the view changes, so declare comments in the model. A view under the model's name that does not read `<model>__current` stops the run. Snowflake cannot read a stream on the view, because change tracking does not support `UNION ALL BY NAME`.
+
 When files stop registering because of an incompatible type change:
 
-1. Declare the new type in `columns`, add the old table name to `previous_versions` with expressions for the changed columns, and run. If the new files share `base_location` with the old table, set `refresh_on_create: false` and refresh only the new paths with `refresh_paths`; a refresh of the whole location would fail on the old files.
+1. Declare the new type in `columns`, add the old table name to `previous_versions` with expressions for the changed columns, and run. If the new files share `base_location` with the old table, set `refresh_on_create: false` and refresh only the new paths with `refresh_paths`; a refresh of the whole location would fail on the old files, so the run stops before one.
 2. The run stops before changing anything and prints the `ALTER ICEBERG TABLE ... RENAME TO ...` statement for the table that holds the old files: the model's table the first time, `<model>__current` later. Run it.
 3. Run again. The package creates `<model>__current`, builds the view, refreshes, and checks registration.
 

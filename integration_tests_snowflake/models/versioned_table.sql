@@ -1,6 +1,7 @@
 {# Files whose is_active changed from an integer to a boolean. pytest drives the move to previous_versions with vars. #}
 {{ config(
     materialized='parquet_direct',
+    on_configuration_change=var('on_configuration_change', 'apply'),
     meta={'parquet_direct': {
         'external_volume': var('external_volume'),
         'catalog': var('catalog_none'),

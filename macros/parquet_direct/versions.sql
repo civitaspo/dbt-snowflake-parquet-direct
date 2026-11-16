@@ -90,15 +90,24 @@
   {%- elif public_is_table -%}
     {%- do errors.append("R07: " ~ relation ~ " is a " ~ public_state.object_type ~ ", not the combined view; rename it to a table listed in previous_versions, or drop it") -%}
   {%- endif -%}
-  {%- if creating and declaration.refresh_on_create -%}
-    {%- set location = declaration.base_location.rstrip('/') ~ '/' -%}
-    {%- for item in previous if item.state.exists and item.state.base_location -%}
-      {%- set other = item.state.base_location.rstrip('/') ~ '/' -%}
-      {%- if location.startswith(other) or other.startswith(location) -%}
-        {%- do errors.append("R08: previous version " ~ item.relation ~ " reads base_location '" ~ item.state.base_location ~ "', which overlaps '" ~ declaration.base_location ~ "'; set refresh_on_create: false so the current table registers only refresh_paths") -%}
-      {%- endif -%}
-    {%- endfor -%}
+  {%- if public_state.exists and not public_is_table and (current_relation | string | upper) not in (public_state.text or '') | upper -%}
+    {%- do errors.append("R10: view " ~ relation ~ " does not read " ~ current_relation ~ ", so previous_versions did not create it; drop or rename it") -%}
   {%- endif -%}
+  {#- A refresh of every file would read the previous versions' files, whose types the current table cannot register. -#}
+  {%- set reasons = [] -%}
+  {%- if creating and declaration.refresh_on_create -%}
+    {%- do reasons.append('set refresh_on_create: false so creating the current table registers no files') -%}
+  {%- endif -%}
+  {%- if not declaration.refresh_paths and not declaration.skip_refresh_if_refresh_paths_empty -%}
+    {%- do reasons.append('set refresh_paths, or skip_refresh_if_refresh_paths_empty: true, so the refresh never reads every file') -%}
+  {%- endif -%}
+  {%- set location = declaration.base_location.rstrip('/') ~ '/' -%}
+  {%- for item in previous if reasons and item.state.exists and item.state.base_location -%}
+    {%- set other = item.state.base_location.rstrip('/') ~ '/' -%}
+    {%- if location.startswith(other) or other.startswith(location) -%}
+      {%- do errors.append("R08: previous version " ~ item.relation ~ " reads base_location '" ~ item.state.base_location ~ "', which overlaps '" ~ declaration.base_location ~ "'; " ~ reasons | join(', and ')) -%}
+    {%- endif -%}
+  {%- endfor -%}
   {{ return(errors) }}
 {%- endmacro %}
 
@@ -131,35 +140,68 @@
   {{ return({'sql': 'select\n    ' ~ items | join(',\n    ') ~ '\nfrom ' ~ item.relation, 'errors': errors}) }}
 {%- endmacro %}
 
-{# CREATE OR REPLACE VIEW for the combined view. Policies and tags are part of the statement, so a replacement never leaves the view without them. #}
-{% macro parquet_direct__view_statement(relation, declaration, previous_selects) -%}
+{#
+  The statements that create or change the combined view. `view` is what parquet_direct__get_view read.
+  - A new view is created with its policies and tags in the statement, so it is never readable without them.
+  - An existing view is changed in place: CREATE OR ALTER VIEW when its query or a declared comment differs, and
+    ALTER VIEW for the declared policies and tags. Grants and undeclared policies and tags stay; Snowflake does not
+    let CREATE OR ALTER set policies or tags.
+  Returns {'create': [...], 'changes': [...], 'reapply': [...]}, where changes are shaped like parquet_direct__diff's.
+#}
+{% macro parquet_direct__view_statements(relation, declaration, previous_selects, view) -%}
   {%- set package = dbt_snowflake_parquet_direct -%}
-  {%- set columns = [] -%}
+  {%- set governed = [] -%}
+  {%- set commented = [] -%}
   {%- set identifiers = [] -%}
   {%- for column in declaration.columns -%}
+    {%- set comment = ' comment ' ~ package.parquet_direct__sql_string(column.comment) if column.comment is not none else '' -%}
     {%- set sql = column.sql -%}
     {%- if column.masking_policy -%}
       {%- set sql = sql ~ ' with masking policy ' ~ column.masking_policy.name -%}
       {%- if column.masking_policy.using -%}{%- set sql = sql ~ ' using (' ~ column.masking_policy.using | join(', ') ~ ')' -%}{%- endif -%}
     {%- endif -%}
     {%- if column.tag -%}{%- set sql = sql ~ ' with tag (' ~ package.parquet_direct__tag_list(column.tag) ~ ')' -%}{%- endif -%}
-    {%- if column.comment is not none -%}{%- set sql = sql ~ ' comment ' ~ package.parquet_direct__sql_string(column.comment) -%}{%- endif -%}
-    {%- do columns.append(sql) -%}
+    {%- do governed.append(sql ~ comment) -%}
+    {%- do commented.append(column.sql ~ comment) -%}
     {%- do identifiers.append(package.parquet_direct__quote_identifier(column.identifier)) -%}
   {%- endfor -%}
-  {%- set lines = ['create or replace view ' ~ relation ~ ' copy grants', '(\n    ' ~ columns | join(',\n    ') ~ '\n)'] -%}
+  {%- set table_options = [] -%}
   {%- if declaration.row_access_policy -%}
-    {%- do lines.append('with row access policy ' ~ declaration.row_access_policy.name ~ ' on (' ~ declaration.row_access_policy.on | join(', ') ~ ')') -%}
+    {%- do table_options.append('with row access policy ' ~ declaration.row_access_policy.name ~ ' on (' ~ declaration.row_access_policy.on | join(', ') ~ ')') -%}
   {%- endif -%}
   {%- if declaration.tag -%}
-    {%- do lines.append('with tag (' ~ package.parquet_direct__tag_list(declaration.tag) ~ ')') -%}
+    {%- do table_options.append('with tag (' ~ package.parquet_direct__tag_list(declaration.tag) ~ ')') -%}
   {%- endif -%}
-  {%- if declaration.comment is not none -%}
-    {%- do lines.append('comment = ' ~ package.parquet_direct__sql_string(declaration.comment)) -%}
-  {%- endif -%}
+  {%- set comment = ['comment = ' ~ package.parquet_direct__sql_string(declaration.comment)] if declaration.comment is not none else [] -%}
   {%- set current = 'select ' ~ identifiers | join(', ') ~ '\nfrom ' ~ package.parquet_direct__current_relation(relation) -%}
-  {%- do lines.append('as\n' ~ (previous_selects + [current]) | join('\nunion all by name\n')) -%}
-  {{ return(lines | join('\n')) }}
+  {%- set query = 'as\n' ~ (previous_selects + [current]) | join('\nunion all by name\n') -%}
+  {%- set definition = (['create or alter view ' ~ relation, '(\n    ' ~ commented | join(',\n    ') ~ '\n)'] + comment + [query]) | join('\n') -%}
+  {%- if not view.exists -%}
+    {%- set create = (['create view ' ~ relation, '(\n    ' ~ governed | join(',\n    ') ~ '\n)'] + table_options + comment + [query]) | join('\n') -%}
+    {{ return({'create': [create], 'changes': [], 'reapply': []}) }}
+  {%- endif -%}
+  {#-
+    Snowflake stores the statement that last changed the view, as written, apart from a leading comment. A CREATE OR
+    ALTER that changes nothing keeps the earlier text, so only the query at the end of the text is compared.
+  -#}
+  {%- set stored = modules.re.sub('(\\s*/\\*((?!\\*/).)*\\*/)+\\s*$', '', view.text or '', flags=modules.re.DOTALL) -%}
+  {%- set reasons = [] -%}
+  {%- if not (' ' ~ stored.split() | join(' ')).endswith(' ' ~ query.split() | join(' ')) -%}
+    {%- do reasons.append('query') -%}
+  {%- endif -%}
+  {%- if declaration.comment is not none and declaration.comment != (view.comment or '') -%}
+    {%- do reasons.append('comment') -%}
+  {%- endif -%}
+  {%- for column in declaration.columns if column.comment is not none and column.comment != ((view.column_comments or {}).get(column.identifier) or '') -%}
+    {%- do reasons.append(column.identifier ~ ' comment') -%}
+  {%- endfor -%}
+  {%- set changes = [] -%}
+  {%- if reasons -%}
+    {%- do changes.append({'key': 'view', 'description': 'view definition changed: ' ~ reasons | join(', '), 'alterable': true, 'statements': [definition]}) -%}
+  {%- endif -%}
+  {%- set governance = package.parquet_direct__governance_changes('alter view ' ~ relation, declaration, view) -%}
+  {%- for change in governance.changes -%}{%- do change.update({'description': 'view ' ~ change.description}) -%}{%- endfor -%}
+  {{ return({'create': [], 'changes': changes + governance.changes, 'reapply': governance.reapply}) }}
 {%- endmacro %}
 
 {#

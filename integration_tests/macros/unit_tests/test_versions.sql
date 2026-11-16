@@ -64,7 +64,7 @@
   {%- set declaration = package.parquet_direct__normalize(versioned_config()) -%}
   {%- set eager = package.parquet_direct__normalize(versioned_config({'refresh_on_create': true})) -%}
   {%- set absent = {'exists': false} -%}
-  {%- set view = {'exists': true, 'is_parquet_direct': false, 'object_type': 'view'} -%}
+  {%- set view = {'exists': true, 'is_parquet_direct': false, 'object_type': 'view', 'text': 'create or alter view ANALYTICS.SALES.ORDERS as select * from analytics.sales.orders__current'} -%}
   {%- set table = {'exists': true, 'is_parquet_direct': true, 'object_type': 'iceberg table', 'base_location': 'sales/'} -%}
   {%- set previous_relation = package.parquet_direct__previous_relation(relation, 'ORDERS_BEFORE_AMOUNT_SCALE') -%}
   {%- set missing = [{'version': declaration.previous_versions[0], 'relation': previous_relation, 'state': absent, 'columns': {}}] -%}
@@ -80,10 +80,18 @@
     ['R06: previous version table ANALYTICS.SALES."ORDERS_BEFORE_AMOUNT_SCALE" does not exist']) -%}
   {%- do assert_equal('the public table must be renamed', error_codes(preflight(relation, declaration, table, absent, present, true)), ['R07']) -%}
   {%- do assert_equal('the combined view is rebuilt', preflight(relation, declaration, view, table, present, false), []) -%}
+  {%- set unrelated = {'exists': true, 'is_parquet_direct': false, 'object_type': 'view', 'text': 'create view ANALYTICS.SALES.ORDERS as select 1 as id'} -%}
+  {%- do assert_equal('a view that does not read the current table is not replaced', preflight(relation, declaration, unrelated, table, present, false),
+    ['R10: view ANALYTICS.SALES.ORDERS does not read ANALYTICS.SALES.ORDERS__current, so previous_versions did not create it; drop or rename it']) -%}
   {%- set reserved = package.parquet_direct__normalize(versioned_config({'previous_versions': [{'table': 'orders__current'}]})) -%}
   {%- do assert_equal('the current table is not a previous version',
     error_codes(preflight(relation, reserved, view, table, [{'version': reserved.previous_versions[0], 'relation': relation, 'state': table, 'columns': {}}], false)), ['R05']) -%}
   {%- do assert_equal('a shared base_location needs refresh_on_create: false', error_codes(preflight(relation, eager, absent, absent, present, true)), ['R08']) -%}
+  {%- set whole = package.parquet_direct__normalize(versioned_config({'refresh_paths': [], 'skip_refresh_if_refresh_paths_empty': false})) -%}
+  {%- do assert_equal('a shared base_location never refreshes every file', preflight(relation, whole, view, table, present, false),
+    ["R08: previous version ANALYTICS.SALES.\"ORDERS_BEFORE_AMOUNT_SCALE\" reads base_location 'sales/', which overlaps 'sales/'; set refresh_paths, or skip_refresh_if_refresh_paths_empty: true, so the refresh never reads every file"]) -%}
+  {%- set skipped = package.parquet_direct__normalize(versioned_config({'refresh_paths': []})) -%}
+  {%- do assert_equal('empty refresh_paths are skipped by default', preflight(relation, skipped, view, table, present, false), []) -%}
   {%- do assert_equal('a shared base_location with refresh_on_create: false', preflight(relation, declaration, absent, absent, present, true), []) -%}
   {%- do assert_equal('a separate base_location may refresh on create', preflight(relation, eager, absent, absent, elsewhere, true), []) -%}
   {%- do assert_equal('an existing current table is not created', preflight(relation, eager, view, table, present, false), []) -%}
@@ -112,22 +120,72 @@
   {%- do item.columns.update({'D': 'DATE', 'AMOUNT': 'NUMBER(12,3)'}) -%}
   {%- do assert_equal('a declared expression wins over an incompatible column', package.parquet_direct__previous_version_select(declaration, item, 0).errors, []) -%}
 
-  {%- do assert_equal('combined view', package.parquet_direct__view_statement(relation.incorporate(type='view'), declaration, ['select 1 as "ID"']),
-    'create or replace view ANALYTICS.SALES.ORDERS copy grants\n'
+  {%- set view_relation = relation.incorporate(type='view') -%}
+  {%- set definition = 'create or alter view ANALYTICS.SALES.ORDERS\n'
     ~ '(\n'
     ~ '    id,\n'
-    ~ "    amount with masking policy governance.policies.mask_amount comment 'it\\'s money',\n"
+    ~ "    amount comment 'it\\'s money',\n"
     ~ '    source_file,\n'
     ~ '    d\n'
     ~ ')\n'
-    ~ 'with row access policy governance.policies.row_access_policy on (id)\n'
-    ~ "with tag (governance.tags.domain = 'sales')\n"
     ~ "comment = 'Sales'\n"
     ~ 'as\n'
     ~ 'select 1 as "ID"\n'
     ~ 'union all by name\n'
     ~ 'select "ID", "AMOUNT", "SOURCE_FILE", "D"\n'
-    ~ 'from ANALYTICS.SALES.ORDERS__current') -%}
+    ~ 'from ANALYTICS.SALES.ORDERS__current' -%}
+  {%- set view_statements = package.parquet_direct__view_statements -%}
+  {%- do assert_equal('a new view carries its policies and tags', view_statements(view_relation, declaration, ['select 1 as "ID"'], {'exists': false}), {
+    'create': [
+      'create view ANALYTICS.SALES.ORDERS\n'
+      ~ '(\n'
+      ~ '    id,\n'
+      ~ "    amount with masking policy governance.policies.mask_amount comment 'it\\'s money',\n"
+      ~ '    source_file,\n'
+      ~ '    d\n'
+      ~ ')\n'
+      ~ 'with row access policy governance.policies.row_access_policy on (id)\n'
+      ~ "with tag (governance.tags.domain = 'sales')\n"
+      ~ "comment = 'Sales'\n"
+      ~ 'as\n'
+      ~ 'select 1 as "ID"\n'
+      ~ 'union all by name\n'
+      ~ 'select "ID", "AMOUNT", "SOURCE_FILE", "D"\n'
+      ~ 'from ANALYTICS.SALES.ORDERS__current',
+    ],
+    'changes': [], 'reapply': []}) -%}
+
+  {%- set governed = {
+    'masking_policies': {'AMOUNT': 'GOVERNANCE.POLICIES.MASK_AMOUNT'},
+    'row_access_policy': {'name': 'GOVERNANCE.POLICIES.ROW_ACCESS_POLICY', 'on': ['ID']},
+    'table_tags': {'GOVERNANCE.TAGS.DOMAIN': 'sales'},
+    'column_tags': {},
+  } -%}
+  {%- set comments = {'comment': 'Sales', 'column_comments': {'ID': none, 'AMOUNT': "it's money"}} -%}
+  {%- set stored = {'exists': true, 'text': 'create view ANALYTICS.SALES.ORDERS (id, amount with masking policy governance.policies.mask_amount) as \n'
+    ~ 'select 1 as "ID"\nunion all by name\nselect "ID", "AMOUNT", "SOURCE_FILE", "D"  \nfrom ANALYTICS.SALES.ORDERS__current\n/* {"app": "dbt"} */'} -%}
+  {%- do stored.update(comments) -%}
+  {%- do stored.update(governed) -%}
+  {%- do assert_equal('an unchanged view is left alone, apart from re-applying masking policies', view_statements(view_relation, declaration, ['select 1 as "ID"'], stored), {
+    'create': [], 'changes': [],
+    'reapply': ['alter view ANALYTICS.SALES.ORDERS alter column amount set masking policy governance.policies.mask_amount force']}) -%}
+  {%- set changed = view_statements(view_relation, declaration, ['select 2 as "ID"'], stored) -%}
+  {%- do assert_equal('a changed query is altered in place', [changed.changes | map(attribute='description') | list, changed.changes[0].statements[0]],
+    [['view definition changed: query'], definition.replace('select 1', 'select 2')]) -%}
+  {%- do stored.update({'comment': 'Old', 'column_comments': {}}) -%}
+  {%- do assert_equal('changed comments are altered in place', view_statements(view_relation, declaration, ['select 1 as "ID"'], stored).changes | map(attribute='description') | list,
+    ['view definition changed: comment, AMOUNT comment']) -%}
+  {%- set ungoverned = {'exists': true, 'text': definition} -%}
+  {%- do ungoverned.update(comments) -%}
+  {%- set ungoverned = view_statements(view_relation, declaration, ['select 1 as "ID"'], ungoverned) -%}
+  {%- do assert_equal('governance changes name the view', ungoverned.changes | map(attribute='description') | list, [
+    'view row_access_policy: none -> governance.policies.row_access_policy', 'view tag: governance.tags.domain', 'view columns: AMOUNT masking_policy -> governance.policies.mask_amount',
+  ]) -%}
+  {%- do assert_equal('declared governance is set with ALTER VIEW', ungoverned.changes | map(attribute='statements') | list, [
+    ['alter view ANALYTICS.SALES.ORDERS add row access policy governance.policies.row_access_policy on (id)'],
+    ["alter view ANALYTICS.SALES.ORDERS set tag governance.tags.domain = 'sales'"],
+    ['alter view ANALYTICS.SALES.ORDERS alter column amount set masking policy governance.policies.mask_amount force'],
+  ]) -%}
 
   {%- set nodes = [
     {'resource_type': 'model', 'relation_name': 'ANALYTICS.SALES.ORDERS', 'config': {'meta': {'parquet_direct': {'previous_versions': [{'table': 'orders_old'}]}}}},
