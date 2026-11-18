@@ -13,6 +13,11 @@
   {{ return(relation.incorporate(path={'identifier': identifier}, quote_policy={'identifier': true}, type='table')) }}
 {%- endmacro %}
 
+{# The comment that marks a table as a model's current table, so a table that another model or process made is never taken over. #}
+{% macro parquet_direct__current_table_comment() -%}
+  {{ return('Current table of a combined view built from previous_versions by dbt-snowflake-parquet-direct') }}
+{%- endmacro %}
+
 {# The identifier of a relation as Snowflake stores it. #}
 {% macro parquet_direct__stored_identifier(relation) -%}
   {{ return(relation.identifier if relation.quote_policy.identifier else dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(relation.identifier)) }}
@@ -20,7 +25,8 @@
 
 {#
   The declaration the current table is built from. Masking policies, row access policies, tags, and comments belong
-  to the combined view, whose columns have the declared types, so the current table leaves them as they are.
+  to the combined view, whose columns have the declared types, so the current table leaves them as they are. Its
+  comment marks it as the model's current table.
 #}
 {% macro parquet_direct__table_declaration(declaration) -%}
   {%- if not declaration.previous_versions -%}{{ return(declaration) }}{%- endif -%}
@@ -36,7 +42,7 @@
   {%- do table.update({
     'columns': columns,
     'partition_columns': columns | selectattr('kind', 'equalto', 'PARTITION') | list,
-    'comment': none,
+    'comment': dbt_snowflake_parquet_direct.parquet_direct__current_table_comment(),
     'tag': {},
     'row_access_policy': none,
   }) -%}
@@ -90,8 +96,12 @@
   {%- elif public_is_table -%}
     {%- do errors.append("R07: " ~ relation ~ " is a " ~ public_state.object_type ~ ", not the combined view; rename it to a table listed in previous_versions, or drop it") -%}
   {%- endif -%}
-  {%- if public_state.exists and not public_is_table and (current_relation | string | upper) not in (public_state.text or '') | upper -%}
+  {%- if public_state.exists and not public_is_table and not package.parquet_direct__reads_relation(public_state.text or '', current_relation) -%}
     {%- do errors.append("R10: view " ~ relation ~ " does not read " ~ current_relation ~ ", so previous_versions did not create it; drop or rename it") -%}
+  {%- endif -%}
+  {%- set marker = package.parquet_direct__current_table_comment() -%}
+  {%- if current_state.exists and current_state.comment != marker -%}
+    {%- do errors.append("R11: " ~ current_relation ~ " exists without the comment '" ~ marker ~ "', so previous_versions did not create it; rename it if another model or process uses it, or set that comment if it holds this model's files") -%}
   {%- endif -%}
   {#- A refresh of every file would read the previous versions' files, whose types the current table cannot register. -#}
   {%- set reasons = [] -%}
@@ -101,12 +111,19 @@
   {%- if not declaration.refresh_paths and not declaration.skip_refresh_if_refresh_paths_empty -%}
     {%- do reasons.append('set refresh_paths, or skip_refresh_if_refresh_paths_empty: true, so the refresh never reads every file') -%}
   {%- endif -%}
-  {%- set location = declaration.base_location.rstrip('/') ~ '/' -%}
+  {#- An existing current table keeps its base location until it is re-created, as with on_configuration_change: continue. -#}
+  {%- set locations = [(declaration.base_location, '')] -%}
+  {%- if current_state.exists and not creating and current_state.base_location and current_state.base_location.rstrip('/') != declaration.base_location.rstrip('/') -%}
+    {%- do locations.append((current_state.base_location, ' of the existing ' ~ current_relation)) -%}
+  {%- endif -%}
   {%- for item in previous if reasons and item.state.exists and item.state.base_location -%}
     {%- set other = item.state.base_location.rstrip('/') ~ '/' -%}
-    {%- if location.startswith(other) or other.startswith(location) -%}
-      {%- do errors.append("R08: previous version " ~ item.relation ~ " reads base_location '" ~ item.state.base_location ~ "', which overlaps '" ~ declaration.base_location ~ "'; " ~ reasons | join(', and ')) -%}
-    {%- endif -%}
+    {%- for location, owner in locations -%}
+      {%- set path = location.rstrip('/') ~ '/' -%}
+      {%- if path.startswith(other) or other.startswith(path) -%}
+        {%- do errors.append("R08: previous version " ~ item.relation ~ " reads base_location '" ~ item.state.base_location ~ "', which overlaps '" ~ location ~ "'" ~ owner ~ "; " ~ reasons | join(', and ')) -%}
+      {%- endif -%}
+    {%- endfor -%}
   {%- endfor -%}
   {{ return(errors) }}
 {%- endmacro %}
@@ -140,12 +157,50 @@
   {{ return({'sql': 'select\n    ' ~ items | join(',\n    ') ~ '\nfrom ' ~ item.relation, 'errors': errors}) }}
 {%- endmacro %}
 
+{# SQL without its string literals and comments, so a search finds only real references. #}
+{% macro parquet_direct__sql_code(sql) -%}
+  {%- set code = modules.re.sub("'(?:[^'\\\\]|\\\\.)*'|\\$\\$.*?\\$\\$", "''", sql, flags=modules.re.DOTALL) -%}
+  {{ return(modules.re.sub('/\\*.*?\\*/|--[^\\n]*', ' ', code, flags=modules.re.DOTALL)) }}
+{%- endmacro %}
+
+{#
+  Whether `sql` has FROM followed by `relation`, outside string literals and comments. Each part of the name is
+  compared as Snowflake stores it: an unquoted part in upper case, a quoted part as written.
+#}
+{% macro parquet_direct__reads_relation(sql, relation) -%}
+  {%- set package = dbt_snowflake_parquet_direct -%}
+  {%- set expected = [] -%}
+  {%- for name, quoted in [(relation.database, relation.quote_policy.database), (relation.schema, relation.quote_policy.schema), (relation.identifier, relation.quote_policy.identifier)] -%}
+    {%- do expected.append(name if quoted else package.parquet_direct__normalize_identifier(name)) -%}
+  {%- endfor -%}
+  {%- set part = '"(?:[^"]|"")*"|[A-Za-z_][\\w$]*' -%}
+  {%- for match in modules.re.finditer('(?i)\\bfrom\\s+((?:' ~ part ~ ')(?:\\s*\\.\\s*(?:' ~ part ~ '))*)', package.parquet_direct__sql_code(sql)) -%}
+    {%- set names = [] -%}
+    {%- for name in modules.re.findall(part, match.group(1)) -%}{%- do names.append(package.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
+    {%- if names == expected -%}{{ return(true) }}{%- endif -%}
+  {%- endfor -%}
+  {{ return(false) }}
+{%- endmacro %}
+
+{# SQL with whitespace collapsed to one space, except inside string literals and quoted identifiers. #}
+{% macro parquet_direct__normalize_whitespace(sql) -%}
+  {%- set parts = modules.re.split("('(?:[^'\\\\]|\\\\.)*'|\"[^\"]*\"|\\$\\$.*?\\$\\$)", sql, flags=modules.re.DOTALL) -%}
+  {%- set normalized = [] -%}
+  {%- for part in parts -%}
+    {%- do normalized.append(part if loop.index is even else modules.re.sub('\\s+', ' ', part)) -%}
+  {%- endfor -%}
+  {{ return(normalized | join('') | trim) }}
+{%- endmacro %}
+
 {#
   The statements that create or change the combined view. `view` is what parquet_direct__get_view read.
   - A new view is created with its policies and tags in the statement, so it is never readable without them.
   - An existing view is changed in place: CREATE OR ALTER VIEW when its query or a declared comment differs, and
     ALTER VIEW for the declared policies and tags. Grants and undeclared policies and tags stay; Snowflake does not
     let CREATE OR ALTER set policies or tags.
+  - A declared masked column that has no masking policy on the view, because the view lacks the column or an earlier
+    run stopped before masking it, is set to NULL and masked before the query gives it values, so a failure in
+    between never leaves its values unmasked.
   Returns {'create': [...], 'changes': [...], 'reapply': [...]}, where changes are shaped like parquet_direct__diff's.
 #}
 {% macro parquet_direct__view_statements(relation, declaration, previous_selects, view) -%}
@@ -175,7 +230,8 @@
   {%- set comment = ['comment = ' ~ package.parquet_direct__sql_string(declaration.comment)] if declaration.comment is not none else [] -%}
   {%- set current = 'select ' ~ identifiers | join(', ') ~ '\nfrom ' ~ package.parquet_direct__current_relation(relation) -%}
   {%- set query = 'as\n' ~ (previous_selects + [current]) | join('\nunion all by name\n') -%}
-  {%- set definition = (['create or alter view ' ~ relation, '(\n    ' ~ commented | join(',\n    ') ~ '\n)'] + comment + [query]) | join('\n') -%}
+  {%- set header = (['create or alter view ' ~ relation, '(\n    ' ~ commented | join(',\n    ') ~ '\n)'] + comment) | join('\n') -%}
+  {%- set definition = header ~ '\n' ~ query -%}
   {%- if not view.exists -%}
     {%- set create = (['create view ' ~ relation, '(\n    ' ~ governed | join(',\n    ') ~ '\n)'] + table_options + comment + [query]) | join('\n') -%}
     {{ return({'create': [create], 'changes': [], 'reapply': []}) }}
@@ -186,7 +242,7 @@
   -#}
   {%- set stored = modules.re.sub('(\\s*/\\*((?!\\*/).)*\\*/)+\\s*$', '', view.text or '', flags=modules.re.DOTALL) -%}
   {%- set reasons = [] -%}
-  {%- if not (' ' ~ stored.split() | join(' ')).endswith(' ' ~ query.split() | join(' ')) -%}
+  {%- if not (' ' ~ package.parquet_direct__normalize_whitespace(stored)).endswith(' ' ~ package.parquet_direct__normalize_whitespace(query)) -%}
     {%- do reasons.append('query') -%}
   {%- endif -%}
   {%- if declaration.comment is not none and declaration.comment != (view.comment or '') -%}
@@ -197,7 +253,22 @@
   {%- endfor -%}
   {%- set changes = [] -%}
   {%- if reasons -%}
-    {%- do changes.append({'key': 'view', 'description': 'view definition changed: ' ~ reasons | join(', '), 'alterable': true, 'statements': [definition]}) -%}
+    {%- set statements = [] -%}
+    {%- set added = declaration.columns | selectattr('masking_policy') | rejectattr('identifier', 'in', (view.masking_policies or {}).keys() | list) | list -%}
+    {%- if added -%}
+      {%- set items = [] -%}
+      {%- for column in declaration.columns -%}
+        {%- set quoted = package.parquet_direct__quote_identifier(column.identifier) -%}
+        {%- do items.append('cast(null as ' ~ package.parquet_direct__normalize_type(column.data_type) ~ ') as ' ~ quoted if column in added else quoted) -%}
+      {%- endfor -%}
+      {%- do statements.append(header ~ '\nas\nselect ' ~ items | join(', ') ~ '\nfrom (\n' ~ query[3:] ~ '\n)') -%}
+      {%- for column in added -%}
+        {%- set using = ' using (' ~ column.masking_policy.using | join(', ') ~ ')' if column.masking_policy.using else '' -%}
+        {%- do statements.append('alter view ' ~ relation ~ ' alter column ' ~ column.sql ~ ' set masking policy ' ~ column.masking_policy.name ~ using ~ ' force') -%}
+      {%- endfor -%}
+    {%- endif -%}
+    {%- do statements.append(definition) -%}
+    {%- do changes.append({'key': 'view', 'description': 'view definition changed: ' ~ reasons | join(', '), 'alterable': true, 'statements': statements}) -%}
   {%- endif -%}
   {%- set governance = package.parquet_direct__governance_changes('alter view ' ~ relation, declaration, view) -%}
   {%- for change in governance.changes -%}{%- do change.update({'description': 'view ' ~ change.description}) -%}{%- endfor -%}
