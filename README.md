@@ -106,7 +106,7 @@ Set these directly under `config`.
 | --- | --- | --- | --- |
 | `materialized` | `parquet_direct` | None | Use this materialization. |
 | `full_refresh` | `true`, `false` | dbt's `--full-refresh` flag | `false` ignores `--full-refresh`, so the table is never re-created. Set it on large tables. |
-| `on_configuration_change` | `apply`, `continue`, `fail` | `apply` | `apply` runs ALTER for alterable changes and stops on re-creation-required changes. `continue` applies nothing and warns about every difference. `fail` stops on any difference. |
+| `on_configuration_change` | `apply`, `continue`, `fail` | `apply` | `apply` runs ALTER for alterable changes and stops on re-creation-required changes. `continue` applies no table change and warns about every difference; the combined view of `previous_versions` is still re-created when it differs. `fail` stops on any difference. |
 | `grants` | dbt grants | None | Applied after creation or reconciliation, before refresh. |
 | `copy_grants` | `true`, `false` | `false` | Adds `COPY GRANTS` when the table is re-created. |
 | `persist_docs` | `relation`, `columns` | None | Uses the model and column descriptions as comments when `comment` is not set. |
