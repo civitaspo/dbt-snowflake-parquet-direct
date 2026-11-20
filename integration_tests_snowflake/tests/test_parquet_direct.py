@@ -168,9 +168,12 @@ def test_refresh_paths_register_only_listed_paths(environment):
     assert ok, output
     assert environment.count("manual_table") == 3
 
+    environment.put("refresh_paths/d=3/c.parquet", parquet([4]))
     ok, output = environment.dbt("run", "-s", "manual_table", refresh_paths=["no-such-dir/"], **common)
     assert ok, output
-    assert environment.count("manual_table") == 3, "a nonexistent refresh path must not refresh the whole base location"
+    # Snowflake's documentation says a path that does not exist refreshes the whole base location; on 2026-11-20 it
+    # registered nothing. R08 follows the documentation, so this records the observed behavior, not a guarantee.
+    assert environment.count("manual_table") == 3, "a refresh of a path that does not exist registered the other paths' files"
 
 
 def test_skipped_file_fails_the_run(environment):
@@ -227,55 +230,89 @@ def flags(ids, values, value_type):
 
 
 def test_previous_version_keeps_files_readable_after_a_type_change(environment):
-    environment.put("versioned/d=1/integer.parquet", flags([1, 2], [0, 1], pa.int64()))
+    schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
+    environment.put("versioned_integer/d=1/integer.parquet", flags([1, 2], [0, 1], pa.int64()))
     ok, output = environment.dbt("run", "-s", "versioned_table", "--full-refresh")
     assert ok, output
-    environment.put("versioned/d=2/boolean.parquet", flags([3, 4], [True, False], pa.bool_()))
-    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_paths=["d=2/"])
-    assert not ok
-    assert "incompatible" in output.lower(), output
 
+    environment.put("versioned_boolean/d=2/boolean.parquet", flags([3, 4], [True, False], pa.bool_()))
     previous = {"table": "versioned_table_before_boolean"}
     converted = {**previous, "columns": {"is_active": "case is_active when 0 then false when 1 then true end"}}
-    common = {"is_active_type": "boolean", "refresh_on_create": False, "refresh_paths": ["d=2/"]}
+    common = {"is_active_type": "boolean", "versioned_directory": "versioned_boolean"}
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], is_active_type="boolean")
+    assert not ok and "R08" in output and "fix them before running it" in output, "a rename that cannot help must not be suggested: " + output
+    assert environment.sql(f"show iceberg tables like 'VERSIONED_TABLE' in schema {schema}"), "nothing is renamed or created before the checks pass"
+
     ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
     assert not ok
     rename = f"alter iceberg table {environment.table('versioned_table')} rename to {environment.table('"VERSIONED_TABLE_BEFORE_BOOLEAN"')}"
-    assert "R06" in output and rename.lower() in output.lower(), output
+    assert "R06" in output and ("rename the table that holds its files first: " + rename).lower() in output.lower(), output
     environment.sql(rename)
 
     ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[previous], **common)
     assert not ok
     assert "R09" in output and "IS_ACTIVE" in output, output
-    assert not environment.sql(f"show objects like 'VERSIONED_TABLE__CURRENT' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
+    assert not environment.sql(f"show objects like 'VERSIONED_TABLE__CURRENT' in schema {schema}")
 
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
-    assert ok, output
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], on_configuration_change="fail", **common)
+    assert ok, "creating the current table builds the view whatever on_configuration_change says: " + output
     ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], on_configuration_change="fail", **common)
     assert ok and output.startswith("unchanged"), "the stored view definition must read back as unchanged: " + output
     rows = environment.sql(f"select id, is_active, d from {environment.table('versioned_table')} order by id")
     assert [(row["ID"], row["IS_ACTIVE"], row["D"]) for row in rows] == [(1, False, "1"), (2, True, "1"), (3, True, "2"), (4, False, "2")]
-    assert environment.sql(f"show views like 'VERSIONED_TABLE' in schema {os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}")
+    assert environment.sql(f"show views like 'VERSIONED_TABLE' in schema {schema}")
     described = {row["name"]: row["comment"] for row in environment.sql(f"desc view {environment.table('versioned_table')}")}
     assert described["IS_ACTIVE"] == "whether the customer is active", described
 
     ok, output = environment.dbt("test", "-s", "versioned_table", previous_versions=[converted], **common)
     assert ok, output
 
-    schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
     environment.sql(f"create masking policy if not exists {schema}.flag_mask as (value boolean) returns boolean -> value")
     environment.sql(f"alter view {environment.table('versioned_table')} modify column is_active set masking policy {schema}.flag_mask")
+    environment.sql(f"grant select on view {environment.table('versioned_table')} to role public")
+    policies = f"select policy_name from table({os.environ['SNOWFLAKE_DATABASE']}.information_schema.policy_references(ref_entity_name => '{environment.table('versioned_table')}', ref_entity_domain => 'view'))"
     inverted = {**previous, "columns": {"is_active": "is_active = 0"}}
     ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="fail", **common)
-    assert not ok and "view definition changed" in output, output
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], **common)
-    assert ok and output.startswith("altered"), output
+    assert not ok and "the combined view differs from its declaration" in output, output
+    assert [row["POLICY_NAME"] for row in environment.sql(policies)] == ["FLAG_MASK"], "fail leaves the view as it is"
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="continue", **common)
+    assert ok and output.startswith("altered"), "continue still re-creates the view: " + output
     rows = environment.sql(f"select id, is_active from {environment.table('versioned_table')} where d = '1' order by id")
     assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [(1, True), (2, False)], rows
-    policies = environment.sql(f"select policy_name from table({os.environ['SNOWFLAKE_DATABASE']}.information_schema.policy_references(ref_entity_name => '{environment.table('versioned_table')}', ref_entity_domain => 'view'))")
-    assert [row["POLICY_NAME"] for row in policies] == ["FLAG_MASK"], "a policy set outside the model must survive a view change"
-    ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[converted], **common)
+    assert environment.sql(policies) == [], "re-creating drops a policy that the model does not declare"
+    grants = f"show grants on view {environment.table('versioned_table')}"
+    assert ("SELECT", "PUBLIC") in [(row["privilege"], row["grantee_name"]) for row in environment.sql(grants)], "re-creating the view keeps its grants"
+    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="fail", **common)
+    assert ok and output.startswith("unchanged"), "the re-created view must read back as unchanged: " + output
+    ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[inverted], **common)
     assert ok, output
+
+    environment.put("versioned_string/d=3/string.parquet", flags([5, 6], ["true", "false"], pa.string()))
+    stringified = {"table": "versioned_table_before_string", "columns": {"is_active": "iff(is_active, 'true', 'false')"}}
+    second = {"is_active_type": "varchar", "versioned_directory": "versioned_string", "refresh_paths": ["d=3/"], "previous_versions": [inverted, stringified]}
+    current = f"show iceberg tables like 'VERSIONED_TABLE__CURRENT' in schema {schema}"
+    ok, output = environment.dbt("run", "-s", "versioned_table", **second)
+    assert not ok and "R15" in output and "fix them before running it" in output, output
+    assert environment.sql(current), "the current table must not be renamed or replaced before the checks pass"
+
+    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, **second)
+    assert not ok
+    rename = f"alter iceberg table {environment.table('versioned_table__current')} rename to {environment.table('"VERSIONED_TABLE_BEFORE_STRING"')}"
+    assert "R06" in output and ("rename the table that holds its files first: " + rename).lower() in output.lower(), output
+    environment.sql(rename)
+    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, is_active_masking_policy=f"{schema}.flag_mask", **second)
+    assert not ok and environment.sql(current), "a boolean masking policy on the varchar column fails the view after the current table exists: " + output
+    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, on_configuration_change="continue", **second)
+    assert ok, "a continue rerun finishes the view of the failed type change: " + output
+    rows = environment.sql(f"select id, is_active, d from {environment.table('versioned_table')} order by id")
+    assert [(row["ID"], row["IS_ACTIVE"], row["D"]) for row in rows] == [
+        (1, "true", "1"), (2, "false", "1"), (3, "true", "2"), (4, "false", "2"), (5, "true", "3"), (6, "false", "3"),
+    ], rows
+    types = {row["name"]: row["type"] for row in environment.sql(f"desc view {environment.table('versioned_table')}")}
+    assert types["IS_ACTIVE"].startswith("VARCHAR"), types
+    assert ("SELECT", "PUBLIC") in [(row["privilege"], row["grantee_name"]) for row in environment.sql(grants)], "re-creating the view keeps its grants"
+    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, on_configuration_change="fail", **second)
+    assert ok and output.startswith("unchanged"), "the re-created view must read back as unchanged: " + output
 
 
 def test_invalid_config_fails_before_any_sql(environment):

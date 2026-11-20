@@ -76,7 +76,7 @@
   {%- set status = dbt_snowflake_parquet_direct.parquet_direct__rows('select system$parquet_direct_auto_refresh_status(' ~ qualified_name ~ ') as status')[0].status -%}
   {%- do details.update({'auto_refresh': dbt_snowflake_parquet_direct.parquet_direct__parse_auto_refresh_status(status).enabled}) -%}
 
-  {%- do details.update(dbt_snowflake_parquet_direct.parquet_direct__get_governance(relation, declaration, 'table')) -%}
+  {%- do details.update(dbt_snowflake_parquet_direct.parquet_direct__get_governance(relation, declaration)) -%}
 
   {%- if declaration.constraints -%}
     {%- set constraints = {} -%}
@@ -100,11 +100,8 @@
   {{ return(details) }}
 {%- endmacro %}
 
-{#
-  The masking policies, row access policy, and tags set on a table or view (`domain` 'table' or 'view'), read only when
-  the declaration has some.
-#}
-{% macro parquet_direct__get_governance(relation, declaration, domain) -%}
+{# The masking policies, row access policy, and tags set on a table, read only when the declaration has some. #}
+{% macro parquet_direct__get_governance(relation, declaration) -%}
   {%- set details = {} -%}
   {%- set qualified_name = dbt_snowflake_parquet_direct.parquet_direct__sql_string(relation | string) -%}
   {%- set information_schema_name = relation.include(schema=false, identifier=false) ~ '.information_schema' -%}
@@ -112,7 +109,7 @@
   {%- if has_policies -%}
     {%- set masking = {} -%}
     {%- do details.update({'masking_policies': masking, 'row_access_policy': none}) -%}
-    {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('select * from table(' ~ information_schema_name ~ ".policy_references(ref_entity_name => " ~ qualified_name ~ ", ref_entity_domain => '" ~ domain ~ "'))") -%}
+    {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('select * from table(' ~ information_schema_name ~ ".policy_references(ref_entity_name => " ~ qualified_name ~ ", ref_entity_domain => 'table'))") -%}
       {%- set name = row.policy_db ~ '.' ~ row.policy_schema ~ '.' ~ row.policy_name -%}
       {%- if row.policy_kind == 'MASKING_POLICY' and row.tag_name is none -%}
         {%- do masking.update({row.ref_column_name: name}) -%}
@@ -138,17 +135,11 @@
   {{ return(details) }}
 {%- endmacro %}
 
-{# A view's stored text, comments, and governance, when the view exists. #}
-{% macro parquet_direct__get_view(relation, declaration) -%}
+{# A view's stored text and whether it is secure, when the view exists. #}
+{% macro parquet_direct__get_view(relation) -%}
   {%- set identifier = dbt_snowflake_parquet_direct.parquet_direct__stored_identifier(relation) -%}
   {%- set shown = dbt_snowflake_parquet_direct.parquet_direct__rows('show views like ' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(identifier) ~ ' in schema ' ~ relation.include(identifier=false)) -%}
   {%- set matches = shown | selectattr('name', 'equalto', identifier) | list -%}
   {%- if not matches -%}{{ return({'exists': false}) }}{%- endif -%}
-  {%- set column_comments = {} -%}
-  {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('desc view ' ~ relation) -%}
-    {%- do column_comments.update({row.name: row.comment}) -%}
-  {%- endfor -%}
-  {%- set view = {'exists': true, 'text': matches[0].text, 'comment': matches[0].comment, 'column_comments': column_comments} -%}
-  {%- do view.update(dbt_snowflake_parquet_direct.parquet_direct__get_governance(relation, declaration, 'view')) -%}
-  {{ return(view) }}
+  {{ return({'exists': true, 'text': matches[0].text, 'secure': (matches[0].is_secure | string | lower) == 'true'}) }}
 {%- endmacro %}

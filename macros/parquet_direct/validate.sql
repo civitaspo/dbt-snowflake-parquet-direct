@@ -342,12 +342,18 @@
         {%- if expressions is not none and expressions is not mapping -%}
           {%- do errors.append("S02: " ~ where ~ ".columns must be a mapping of column names to SQL expressions") -%}
         {%- elif expressions is mapping -%}
+          {%- set keys = {} -%}
           {%- for name, expression in expressions.items() -%}
             {%- if expression is not string or expression | trim == '' -%}
               {%- do errors.append("S02: " ~ where ~ ".columns." ~ name ~ " must be a non-empty SQL expression") -%}
             {%- endif -%}
-            {%- if name is not string or name | replace('"', '') | upper not in names -%}
+            {%- set key = dbt_snowflake_parquet_direct.parquet_direct__column_key(name) if name is string else none -%}
+            {%- if key not in names -%}
               {%- do errors.append("S16: " ~ where ~ ".columns key '" ~ name ~ "' is not a declared column") -%}
+            {%- elif key in keys -%}
+              {%- do errors.append("S16: " ~ where ~ ".columns keys '" ~ keys[key] ~ "' and '" ~ name ~ "' name the same column") -%}
+            {%- else -%}
+              {%- do keys.update({key: name}) -%}
             {%- endif -%}
           {%- endfor -%}
         {%- endif -%}
@@ -397,6 +403,10 @@
     {%- do errors.append("R03: an object that is not a Parquet Direct table (" ~ state.object_type ~ ") already exists; parquet_direct never replaces it" ~ hint) -%}
   {%- elif state.exists and full_refresh and not declaration.refresh_on_create -%}
     {%- do warnings.append("R04: re-creating with refresh_on_create: false registers only the files under refresh_paths until the next refresh") -%}
+  {%- endif -%}
+  {%- set current_table_comment = dbt_snowflake_parquet_direct.parquet_direct__current_table_comment() -%}
+  {%- if state.exists and state.comment == current_table_comment and declaration.comment != current_table_comment -%}
+    {%- do errors.append("R13: the table is the current table of a combined view built from previous_versions, so only that model changes it; use another alias") -%}
   {%- endif -%}
   {{ return({'errors': errors, 'warnings': warnings}) }}
 {%- endmacro %}

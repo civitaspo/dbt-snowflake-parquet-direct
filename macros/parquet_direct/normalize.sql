@@ -53,7 +53,7 @@
   {%- for version in declaration.get('previous_versions') or [] -%}
     {%- set expressions = {} -%}
     {%- for name, expression in (version.get('columns') or {}).items() -%}
-      {%- for column in columns if column.name | upper == name | replace('"', '') | upper -%}
+      {%- for column in columns if column.name | upper == dbt_snowflake_parquet_direct.parquet_direct__column_key(name) -%}
         {%- do expressions.update({column.identifier: expression}) -%}
       {%- endfor -%}
     {%- endfor -%}

@@ -29,16 +29,23 @@
 
 {#
   A type as DESC ICEBERG TABLE prints it. Nested types such as OBJECT(n INT) are normalized element by element,
-  and field names are folded like type names on both sides, so the two forms still compare equal.
+  and field names are folded like type names on both sides, so the two forms still compare equal. With
+  `keep_field_names`, an OBJECT's field names stay as written, for SQL: a CAST that changes them fails a UNION.
 #}
-{% macro parquet_direct__normalize_type(data_type) -%}
-  {%- set text = modules.re.sub('DOUBLE\\s+PRECISION', 'DOUBLE', data_type | upper) -%}
-  {%- set out = {'text': '', 'word': false} -%}
-  {%- for token in modules.re.findall('[A-Z_][A-Z0-9_]*(?:\\s*\\([0-9,\\s]*\\))?|[(),]|[^\\s(),]+', text) -%}
-    {%- if token in ['(', ')', ','] -%}
-      {%- do out.update({'text': out.text ~ token, 'word': false}) -%}
+{% macro parquet_direct__normalize_type(data_type, keep_field_names=false) -%}
+  {%- set text = modules.re.sub('(?i)DOUBLE\\s+PRECISION', 'DOUBLE', data_type if keep_field_names else data_type | upper) -%}
+  {%- set out = {'text': '', 'word': false, 'last': '', 'field': false} -%}
+  {%- set parents = [] -%}
+  {%- for token in modules.re.findall('(?i)[A-Z_][A-Z0-9_]*(?:\\s*\\([0-9,\\s]*\\))?|[(),]|[^\\s(),]+', text) -%}
+    {%- if token in ['(', ','] -%}
+      {%- if token == '(' -%}{%- do parents.append(out.last) -%}{%- endif -%}
+      {%- do out.update({'text': out.text ~ token, 'word': false, 'field': (parents | last) == 'OBJECT' if parents else false}) -%}
+    {%- elif token == ')' -%}
+      {%- if parents -%}{%- do parents.pop() -%}{%- endif -%}
+      {%- do out.update({'text': out.text ~ token, 'word': false, 'field': false}) -%}
     {%- else -%}
-      {%- do out.update({'text': out.text ~ (' ' if out.word else '') ~ dbt_snowflake_parquet_direct.parquet_direct__normalize_scalar_type(token), 'word': true}) -%}
+      {%- set value = token if out.field and keep_field_names else dbt_snowflake_parquet_direct.parquet_direct__normalize_scalar_type(token | upper) -%}
+      {%- do out.update({'text': out.text ~ (' ' if out.word else '') ~ value, 'word': true, 'last': token | upper, 'field': false}) -%}
     {%- endif -%}
   {%- endfor -%}
   {{ return(out.text) }}
@@ -249,7 +256,7 @@
 
 {#
   Changes to the masking policies, row access policy, and tags that `declaration` declares, as ALTER statements that
-  start with `alter` (`alter iceberg table <name>` or `alter view <name>`). Undeclared ones are left as they are.
+  start with `alter`, such as `alter iceberg table <name>`. Undeclared ones are left as they are.
   `details` holds what parquet_direct__get_governance read.
 #}
 {% macro parquet_direct__governance_changes(alter, declaration, details) -%}
