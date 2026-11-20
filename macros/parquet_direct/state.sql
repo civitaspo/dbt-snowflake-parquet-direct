@@ -60,7 +60,6 @@
   {%- set details = {} -%}
   {%- do details.update(state) -%}
   {%- set qualified_name = dbt_snowflake_parquet_direct.parquet_direct__sql_string(relation | string) -%}
-  {%- set information_schema_name = relation.include(schema=false, identifier=false) ~ '.information_schema' -%}
 
   {%- set columns = [] -%}
   {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('desc iceberg table ' ~ relation) -%}
@@ -77,6 +76,35 @@
   {%- set status = dbt_snowflake_parquet_direct.parquet_direct__rows('select system$parquet_direct_auto_refresh_status(' ~ qualified_name ~ ') as status')[0].status -%}
   {%- do details.update({'auto_refresh': dbt_snowflake_parquet_direct.parquet_direct__parse_auto_refresh_status(status).enabled}) -%}
 
+  {%- do details.update(dbt_snowflake_parquet_direct.parquet_direct__get_governance(relation, declaration)) -%}
+
+  {%- if declaration.constraints -%}
+    {%- set constraints = {} -%}
+    {%- for type, command in [('primary_key', 'primary keys'), ('unique', 'unique keys'), ('foreign_key', 'imported keys')] -%}
+      {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('show ' ~ command ~ ' in table ' ~ relation) | sort(attribute='key_sequence') -%}
+        {%- set name = row.fk_name if type == 'foreign_key' else row.constraint_name -%}
+        {%- if name not in constraints -%}
+          {%- set references = none -%}
+          {%- if type == 'foreign_key' -%}
+            {%- set references = {'table': row.pk_database_name ~ '.' ~ row.pk_schema_name ~ '.' ~ row.pk_table_name, 'columns': []} -%}
+          {%- endif -%}
+          {%- do constraints.update({name: {'type': type, 'name': name, 'columns': [], 'rely': (row.rely | string | lower) == 'true', 'references': references}}) -%}
+        {%- endif -%}
+        {%- do constraints[name].columns.append(row.fk_column_name if type == 'foreign_key' else row.column_name) -%}
+        {%- if type == 'foreign_key' -%}{%- do constraints[name].references.columns.append(row.pk_column_name) -%}{%- endif -%}
+      {%- endfor -%}
+    {%- endfor -%}
+    {%- do details.update({'constraints': constraints.values() | list}) -%}
+  {%- endif -%}
+
+  {{ return(details) }}
+{%- endmacro %}
+
+{# The masking policies, row access policy, and tags set on a table, read only when the declaration has some. #}
+{% macro parquet_direct__get_governance(relation, declaration) -%}
+  {%- set details = {} -%}
+  {%- set qualified_name = dbt_snowflake_parquet_direct.parquet_direct__sql_string(relation | string) -%}
+  {%- set information_schema_name = relation.include(schema=false, identifier=false) ~ '.information_schema' -%}
   {%- set has_policies = declaration.row_access_policy or declaration.columns | selectattr('masking_policy') | list -%}
   {%- if has_policies -%}
     {%- set masking = {} -%}
@@ -104,25 +132,14 @@
     {%- endfor -%}
     {%- do details.update({'table_tags': table_tags, 'column_tags': column_tags}) -%}
   {%- endif -%}
-
-  {%- if declaration.constraints -%}
-    {%- set constraints = {} -%}
-    {%- for type, command in [('primary_key', 'primary keys'), ('unique', 'unique keys'), ('foreign_key', 'imported keys')] -%}
-      {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('show ' ~ command ~ ' in table ' ~ relation) | sort(attribute='key_sequence') -%}
-        {%- set name = row.fk_name if type == 'foreign_key' else row.constraint_name -%}
-        {%- if name not in constraints -%}
-          {%- set references = none -%}
-          {%- if type == 'foreign_key' -%}
-            {%- set references = {'table': row.pk_database_name ~ '.' ~ row.pk_schema_name ~ '.' ~ row.pk_table_name, 'columns': []} -%}
-          {%- endif -%}
-          {%- do constraints.update({name: {'type': type, 'name': name, 'columns': [], 'rely': (row.rely | string | lower) == 'true', 'references': references}}) -%}
-        {%- endif -%}
-        {%- do constraints[name].columns.append(row.fk_column_name if type == 'foreign_key' else row.column_name) -%}
-        {%- if type == 'foreign_key' -%}{%- do constraints[name].references.columns.append(row.pk_column_name) -%}{%- endif -%}
-      {%- endfor -%}
-    {%- endfor -%}
-    {%- do details.update({'constraints': constraints.values() | list}) -%}
-  {%- endif -%}
-
   {{ return(details) }}
+{%- endmacro %}
+
+{# A view's stored text and whether it is secure, when the view exists. #}
+{% macro parquet_direct__get_view(relation) -%}
+  {%- set identifier = dbt_snowflake_parquet_direct.parquet_direct__stored_identifier(relation) -%}
+  {%- set shown = dbt_snowflake_parquet_direct.parquet_direct__rows('show views like ' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(identifier) ~ ' in schema ' ~ relation.include(identifier=false)) -%}
+  {%- set matches = shown | selectattr('name', 'equalto', identifier) | list -%}
+  {%- if not matches -%}{{ return({'exists': false}) }}{%- endif -%}
+  {{ return({'exists': true, 'text': matches[0].text, 'secure': (matches[0].is_secure | string | lower) == 'true'}) }}
 {%- endmacro %}

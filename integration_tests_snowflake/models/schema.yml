@@ -10,3 +10,8 @@ models:
             ignore_file_patterns: ['/broken[.]parquet$']
           config:
             tags: [ignore_check]
+  - name: versioned_table
+    data_tests:
+      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+          arguments:
+            lookback_hours: 1

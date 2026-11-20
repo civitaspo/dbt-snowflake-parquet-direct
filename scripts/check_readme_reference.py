@@ -56,6 +56,7 @@ def main() -> int:
         "Columns": keys["column"],
         "Registration check": keys["registration_check"],
         "Constraints": keys["constraint"],
+        "Previous versions": keys["previous_version"],
         "Generic test": [name for name in test_arguments if name != "model"],
         "Run-operation": operation_arguments,
     }

@@ -8,7 +8,7 @@
       'auto_refresh', 'refresh_on_create', 'replace_invalid_characters', 'log_event_level',
       'columns', 'virtual_columns', 'partition_columns', 'constraints',
       'row_access_policy', 'tag', 'comment',
-      'refresh_paths', 'skip_refresh_if_refresh_paths_empty', 'registration_check',
+      'refresh_paths', 'skip_refresh_if_refresh_paths_empty', 'registration_check', 'previous_versions',
     ],
     'column': ['name', 'data_type', 'expression', 'not_null', 'constraints', 'masking_policy', 'tag', 'comment', 'quote'],
     'registration_check': ['on_skipped', 'on_unhealthy', 'lookback_hours', 'ignore_file_patterns', 'max_reported_files'],
@@ -17,6 +17,7 @@
     'references': ['table', 'columns'],
     'row_access_policy': ['name', 'on'],
     'masking_policy': ['name', 'using'],
+    'previous_version': ['table', 'columns'],
   }) }}
 {%- endmacro %}
 
@@ -311,6 +312,55 @@
     {%- endfor -%}
   {%- endif -%}
 
+  {#- S16, S17: previous versions -#}
+  {%- set previous_versions = declaration.get('previous_versions') -%}
+  {%- if previous_versions is not none and not dbt_snowflake_parquet_direct.parquet_direct__is_list(previous_versions) -%}
+    {%- do errors.append("S02: previous_versions must be a list") -%}
+  {%- elif previous_versions -%}
+    {%- if columns | length == 0 -%}
+      {%- do errors.append("S16: previous_versions requires columns, which define the combined view") -%}
+    {%- endif -%}
+    {%- if auto_refresh -%}
+      {%- do errors.append("S17: previous_versions cannot be set with auto_refresh: true, because auto refresh next to a previous version's files is not verified") -%}
+    {%- endif -%}
+    {%- set tables = [] -%}
+    {%- for version in previous_versions -%}
+      {%- set where = 'previous_versions[' ~ loop.index0 ~ ']' -%}
+      {%- if version is not mapping -%}
+        {%- do errors.append("S02: " ~ where ~ " must be a mapping with table and columns") -%}
+      {%- else -%}
+        {%- do dbt_snowflake_parquet_direct.parquet_direct__check_keys(errors, version, keys.previous_version, where) -%}
+        {%- set table = version.get('table') -%}
+        {%- if table is not string or not modules.re.match('^([A-Za-z_][A-Za-z0-9_$]*|"[^"]+")$', table) -%}
+          {%- do errors.append("S02: " ~ where ~ ".table must be a table name in the model's schema, without database, schema, or embedded double quotes") -%}
+        {%- elif dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(table) in tables -%}
+          {%- do errors.append("S16: previous version table " ~ table ~ " is listed more than once") -%}
+        {%- else -%}
+          {%- do tables.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(table)) -%}
+        {%- endif -%}
+        {%- set expressions = version.get('columns') -%}
+        {%- if expressions is not none and expressions is not mapping -%}
+          {%- do errors.append("S02: " ~ where ~ ".columns must be a mapping of column names to SQL expressions") -%}
+        {%- elif expressions is mapping -%}
+          {%- set keys = {} -%}
+          {%- for name, expression in expressions.items() -%}
+            {%- if expression is not string or expression | trim == '' -%}
+              {%- do errors.append("S02: " ~ where ~ ".columns." ~ name ~ " must be a non-empty SQL expression") -%}
+            {%- endif -%}
+            {%- set key = dbt_snowflake_parquet_direct.parquet_direct__column_key(name) if name is string else none -%}
+            {%- if key not in names -%}
+              {%- do errors.append("S16: " ~ where ~ ".columns key '" ~ name ~ "' is not a declared column") -%}
+            {%- elif key in keys -%}
+              {%- do errors.append("S16: " ~ where ~ ".columns keys '" ~ keys[key] ~ "' and '" ~ name ~ "' name the same column") -%}
+            {%- else -%}
+              {%- do keys.update({key: name}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+
   {#- S13 -#}
   {%- if not auto_refresh and check is mapping and check.get('lookback_hours') is not none -%}
     {%- do errors.append("S13: registration_check.lookback_hours applies only with auto_refresh: true") -%}
@@ -349,9 +399,14 @@
     {%- do errors.append("R02: catalog integration " ~ catalog.name ~ " uses TABLE_FORMAT = HIVE, which infers partition columns; remove partition_columns") -%}
   {%- endif -%}
   {%- if state.exists and not state.is_parquet_direct -%}
-    {%- do errors.append("R03: an object that is not a Parquet Direct table (" ~ state.object_type ~ ") already exists; parquet_direct never replaces it") -%}
+    {%- set hint = "; a combined view stays a view, so removing previous_versions is not supported" if state.object_type == 'view' else '' -%}
+    {%- do errors.append("R03: an object that is not a Parquet Direct table (" ~ state.object_type ~ ") already exists; parquet_direct never replaces it" ~ hint) -%}
   {%- elif state.exists and full_refresh and not declaration.refresh_on_create -%}
     {%- do warnings.append("R04: re-creating with refresh_on_create: false registers only the files under refresh_paths until the next refresh") -%}
+  {%- endif -%}
+  {%- set current_table_comment = dbt_snowflake_parquet_direct.parquet_direct__current_table_comment() -%}
+  {%- if state.exists and state.comment == current_table_comment and declaration.comment != current_table_comment -%}
+    {%- do errors.append("R13: the table is the current table of a combined view built from previous_versions, so only that model changes it; use another alias") -%}
   {%- endif -%}
   {{ return({'errors': errors, 'warnings': warnings}) }}
 {%- endmacro %}

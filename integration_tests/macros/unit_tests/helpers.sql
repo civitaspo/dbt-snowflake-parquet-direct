@@ -4,6 +4,7 @@
   {%- set tests = [
     test_validate, test_preflight, test_config_effects, test_ddl, test_type_comparison,
     test_diff, test_snowflake_stored_forms, test_recreation_error, test_refresh_statements, test_history, test_registration_findings, test_registration_test_sql, test_expected_auto_refresh,
+    test_previous_versions_validation, test_previous_versions_declaration, test_previous_versions_preflight, test_combined_view,
   ] -%}
   {%- for test in tests -%}
     {%- do test() -%}

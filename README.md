@@ -106,7 +106,7 @@ Set these directly under `config`.
 | --- | --- | --- | --- |
 | `materialized` | `parquet_direct` | None | Use this materialization. |
 | `full_refresh` | `true`, `false` | dbt's `--full-refresh` flag | `false` ignores `--full-refresh`, so the table is never re-created. Set it on large tables. |
-| `on_configuration_change` | `apply`, `continue`, `fail` | `apply` | `apply` runs ALTER for alterable changes and stops on re-creation-required changes. `continue` applies nothing and warns about every difference. `fail` stops on any difference. |
+| `on_configuration_change` | `apply`, `continue`, `fail` | `apply` | `apply` runs ALTER for alterable changes and stops on re-creation-required changes. `continue` applies no table change and warns about every difference; the combined view of `previous_versions` is still re-created when it differs. `fail` stops on any difference. |
 | `grants` | dbt grants | None | Applied after creation or reconciliation, before refresh. |
 | `copy_grants` | `true`, `false` | `false` | Adds `COPY GRANTS` when the table is re-created. |
 | `persist_docs` | `relation`, `columns` | None | Uses the model and column descriptions as comments when `comment` is not set. |
@@ -140,6 +140,7 @@ Set these directly under `config`.
 | `refresh_paths` | list of strings | Empty | With `auto_refresh: false`, paths relative to `base_location` to refresh on every run, including the run that creates the table. A path is a prefix; end directories with `/`. | Not compared |
 | `skip_refresh_if_refresh_paths_empty` | boolean | `true` | With `auto_refresh: false` and empty `refresh_paths`: `true` skips the refresh, `false` refreshes the whole `base_location`. | Not compared |
 | `registration_check` | mapping | See [Registration check](#registration-check) | How skipped files and auto refresh health are reported. | Not compared |
+| `previous_versions` | list | Empty | Tables that hold files written before an incompatible type change, oldest first. The model becomes a view over them and its current table, see [Previous versions](#previous-versions). | Not compared |
 
 `row_access_policy` takes:
 
@@ -188,6 +189,33 @@ Constraints are not enforced by Snowflake. When the model declares constraints, 
 | `columns` | non-empty list of column names | Required | The constrained columns. |
 | `rely` | boolean | `false` | `RELY`. |
 | `references` | mapping | Required for `foreign_key` only | `table` as `database.schema.table` and `columns`, a non-empty list. |
+
+### Previous versions
+
+Each entry of `previous_versions` takes:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `table` | string | A Parquet Direct table in the model's schema, without database or schema. A quoted name keeps its case. |
+| `columns` | mapping of column name to SQL expression | How the table's columns produce a declared column, such as `case is_active when 0 then false when 1 then true end`. A declared column without an expression reads the same-named column, which must have the declared type or a narrower `NUMBER` with the same scale, or is NULL when the table lacks it. A key is the column's name as declared, compared case-insensitively, optionally in double quotes: `a"b` or `'"a""b"'` for the column `a"b`. Each column takes one key. |
+
+With `previous_versions`, the model's name is a view that combines each previous version and the current table `<model>__current` with `UNION ALL BY NAME`. Masking policies, row access policies, tags, and comments are set on the view; constraints on the current table. dbt `grants` apply to the view. Registration checks read the current table, and previous versions are never refreshed or altered. `auto_refresh: true` is not supported with previous versions, and a `continue` run stops when `<model>__current` has auto refresh turned on outside dbt, because the run would skip `refresh_paths`.
+
+The package creates the view with its policies, tags, and comments in the `CREATE VIEW` statement, so it is never readable without them, and writes a comment after the view's name that holds a digest of that declaration. A later run compares the digest only; it does not read the view's policies back. When the declaration differs, such as a new previous version, a changed expression, policy, tag, or comment, the run re-creates the view with `CREATE OR REPLACE VIEW ... COPY GRANTS` and its policies and tags in one statement. That keeps grants and a secure view's `SECURE` but drops policies and tags that the model does not declare, so declare every policy and tag the view needs. With `on_configuration_change: fail`, a differing view stops the run like a table change, except in a run that creates or replaces `<model>__current`. `continue` still re-creates the view, so a rerun after a failed type change finishes it. A view under the model's name without the package's comment stops the run, and so does an existing `<model>__current` without the comment the package gives it, so a view or table that another model or process made under those names is never changed, used, or replaced. Snowflake cannot read a stream on the view, because change tracking does not support `UNION ALL BY NAME`.
+
+When files stop registering because of an incompatible type change:
+
+1. Write the files with the new type under a `base_location` of their own. Declare the new type in `columns` and the new `base_location`, add the old table name to `previous_versions` with expressions for the changed columns, and run. From the second change on, the view already exists and reads `<model>__current` as soon as it exists, so also set `refresh_on_create: false` and list the new paths in `refresh_paths`; the files are then registered after the view changes.
+2. The run checks everything as if the table that holds the old files were already renamed to the last table in `previous_versions`: the model's table the first time, `<model>__current` later. If the run would then go on, it stops before changing anything and prints the `ALTER ICEBERG TABLE ... RENAME TO ...` statement. Run it. Otherwise it lists what to fix first and prints no statement, so the model's name keeps working. A missing older table is reported without a statement. The renamed table keeps its grants, including those that dbt `grants` gave the model's table, so run `SHOW GRANTS` on it and revoke direct access that should go through the view.
+3. Run again. The package creates `<model>__current`, builds the view, refreshes, and checks registration. Between the rename and this run, the model's name does not read the renamed table. If this run fails, whether `<model>__current` exists tells how far it got:
+   - It does not exist: nothing changed after the rename. Rename the table back to restore the model: to the model's name the first time, to `<model>__current` later.
+   - It exists: the run created it and may have changed the view, which may already read the renamed table. Keep the names, fix the cause, and run again; the run finishes the view and registers the files.
+
+Removing `previous_versions` later is not supported. A model without `previous_versions` stops when its table is another model's `<model>__current`.
+
+The view is the access boundary: policies and tags are on the view, not on `<model>__current` or the previous versions. Grant consumers `SELECT` on the view only. A grant that reaches the tables, such as `GRANT SELECT ON ALL ICEBERG TABLES IN SCHEMA` or an inherited grant on Iceberg tables in the schema, lets consumers read them without the view's masking and row access policies.
+
+The run stops when the current table's base location overlaps a previous version's. Snowflake matches a refresh path as a prefix and documents that a path that does not exist refreshes the whole base location, so a shared location could register the old files into the current table. Base locations are compared as paths on the same external volume. Two external volumes whose storage locations overlap are not detected, so keep each model's files under one external volume. An existing `<model>__current` on another external volume than the declared one stops the run, even with `on_configuration_change: continue`; run with `--full-refresh` to re-create it on the declared volume.
 
 ### Registration check
 

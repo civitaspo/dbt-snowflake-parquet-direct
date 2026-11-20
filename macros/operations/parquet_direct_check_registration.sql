@@ -19,7 +19,7 @@
     {{ exceptions.raise_compiler_error('Cannot check ' ~ model ~ ':\n  - ' ~ errors | join('\n  - ')) }}
   {%- endif -%}
   {%- set declaration = package.parquet_direct__normalize(raw_options) -%}
-  {%- set relation = ref(model) -%}
+  {%- set relation = package.parquet_direct__current_relation(ref(model)) if declaration.previous_versions else ref(model) -%}
   {%- set summary = package.parquet_direct__check_registration(relation, declaration, "dateadd('hour', -" ~ hours ~ ", current_timestamp())") -%}
   {%- do log(relation ~ ': registered ' ~ summary.counts.registered ~ ', unregistered ' ~ summary.counts.unregistered ~ ', skipped ' ~ summary.skipped | length ~ ' in the last ' ~ hours ~ ' hours', info=true) -%}
 {% endmacro %}

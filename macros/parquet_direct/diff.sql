@@ -29,16 +29,23 @@
 
 {#
   A type as DESC ICEBERG TABLE prints it. Nested types such as OBJECT(n INT) are normalized element by element,
-  and field names are folded like type names on both sides, so the two forms still compare equal.
+  and field names are folded like type names on both sides, so the two forms still compare equal. With
+  `keep_field_names`, an OBJECT's field names stay as written, for SQL: a CAST that changes them fails a UNION.
 #}
-{% macro parquet_direct__normalize_type(data_type) -%}
-  {%- set text = modules.re.sub('DOUBLE\\s+PRECISION', 'DOUBLE', data_type | upper) -%}
-  {%- set out = {'text': '', 'word': false} -%}
-  {%- for token in modules.re.findall('[A-Z_][A-Z0-9_]*(?:\\s*\\([0-9,\\s]*\\))?|[(),]|[^\\s(),]+', text) -%}
-    {%- if token in ['(', ')', ','] -%}
-      {%- do out.update({'text': out.text ~ token, 'word': false}) -%}
+{% macro parquet_direct__normalize_type(data_type, keep_field_names=false) -%}
+  {%- set text = modules.re.sub('(?i)DOUBLE\\s+PRECISION', 'DOUBLE', data_type if keep_field_names else data_type | upper) -%}
+  {%- set out = {'text': '', 'word': false, 'last': '', 'field': false} -%}
+  {%- set parents = [] -%}
+  {%- for token in modules.re.findall('(?i)[A-Z_][A-Z0-9_]*(?:\\s*\\([0-9,\\s]*\\))?|[(),]|[^\\s(),]+', text) -%}
+    {%- if token in ['(', ','] -%}
+      {%- if token == '(' -%}{%- do parents.append(out.last) -%}{%- endif -%}
+      {%- do out.update({'text': out.text ~ token, 'word': false, 'field': (parents | last) == 'OBJECT' if parents else false}) -%}
+    {%- elif token == ')' -%}
+      {%- if parents -%}{%- do parents.pop() -%}{%- endif -%}
+      {%- do out.update({'text': out.text ~ token, 'word': false, 'field': false}) -%}
     {%- else -%}
-      {%- do out.update({'text': out.text ~ (' ' if out.word else '') ~ dbt_snowflake_parquet_direct.parquet_direct__normalize_scalar_type(token), 'word': true}) -%}
+      {%- set value = token if out.field and keep_field_names else dbt_snowflake_parquet_direct.parquet_direct__normalize_scalar_type(token | upper) -%}
+      {%- do out.update({'text': out.text ~ (' ' if out.word else '') ~ value, 'word': true, 'last': token | upper, 'field': false}) -%}
     {%- endif -%}
   {%- endfor -%}
   {{ return(out.text) }}
@@ -164,24 +171,9 @@
   {%- if declaration.comment is not none and declaration.comment != (state.comment or '') -%}
     {%- do changes.append({'key': 'comment', 'description': 'comment changed', 'alterable': true, 'statements': [alter ~ ' set comment = ' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(declaration.comment)]}) -%}
   {%- endif -%}
-  {%- set row_access_policy = declaration.row_access_policy -%}
-  {%- if row_access_policy -%}
-    {%- set on = [] -%}
-    {%- for name in row_access_policy.on -%}{%- do on.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
-    {%- set current = state.row_access_policy -%}
-    {%- if not current or current.name != dbt_snowflake_parquet_direct.parquet_direct__qualify(row_access_policy.name) or current.on != on -%}
-      {%- set add = 'add row access policy ' ~ row_access_policy.name ~ ' on (' ~ row_access_policy.on | join(', ') ~ ')' -%}
-      {%- set statement = alter ~ ' ' ~ ('drop row access policy ' ~ current.name ~ ', ' if current else '') ~ add -%}
-      {%- do changes.append({'key': 'row_access_policy', 'description': 'row_access_policy: ' ~ (current.name if current else 'none') ~ ' -> ' ~ row_access_policy.name, 'alterable': true, 'statements': [statement]}) -%}
-    {%- endif -%}
-  {%- endif -%}
-  {%- set tags = {} -%}
-  {%- for name, value in declaration.tag | dictsort if (state.table_tags or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
-    {%- do tags.update({name: value}) -%}
-  {%- endfor -%}
-  {%- if tags -%}
-    {%- do changes.append({'key': 'tag', 'description': 'tag: ' ~ tags.keys() | join(', '), 'alterable': true, 'statements': [alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(tags)]}) -%}
-  {%- endif -%}
+  {%- set governance = dbt_snowflake_parquet_direct.parquet_direct__governance_changes(alter, declaration, state) -%}
+  {%- do changes.extend(governance.changes) -%}
+  {%- do reapply.extend(governance.reapply) -%}
 
   {%- set actual_columns = {} -%}
   {%- for column in state.columns or [] -%}{%- do actual_columns.update({column.name: column}) -%}{%- endfor -%}
@@ -218,25 +210,6 @@
       {%- endif -%}
       {%- if column.comment is not none and column.comment != (actual.comment or '') -%}
         {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' comment changed', 'alterable': true, 'statements': [column_alter ~ ' comment ' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(column.comment)]}) -%}
-      {%- endif -%}
-      {%- set policy = column.masking_policy -%}
-      {%- if policy -%}
-        {%- set using = ' using (' ~ policy.using | join(', ') ~ ')' if policy.using else '' -%}
-        {#- FORCE replaces an existing policy in one statement, so the column is never unmasked in between. -#}
-        {%- set statement = column_alter ~ ' set masking policy ' ~ policy.name ~ using ~ ' force' -%}
-        {%- if (state.masking_policies or {}).get(column.identifier) != dbt_snowflake_parquet_direct.parquet_direct__qualify(policy.name) -%}
-          {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' masking_policy -> ' ~ policy.name, 'alterable': true, 'statements': [statement]}) -%}
-        {%- else -%}
-          {#- POLICY_REFERENCES reports no USING columns for masking policies, so adding, changing, or removing using is invisible; re-apply instead. -#}
-          {%- do reapply.append(statement) -%}
-        {%- endif -%}
-      {%- endif -%}
-      {%- set column_tags = {} -%}
-      {%- for name, value in column.tag | dictsort if ((state.column_tags or {}).get(column.identifier) or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
-        {%- do column_tags.update({name: value}) -%}
-      {%- endfor -%}
-      {%- if column_tags -%}
-        {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' tag: ' ~ column_tags.keys() | join(', '), 'alterable': true, 'statements': [column_alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(column_tags)]}) -%}
       {%- endif -%}
     {%- endif -%}
   {%- endfor -%}
@@ -279,6 +252,57 @@
   {%- endif -%}
 
   {{ return({'changes': changes, 'notes': notes, 'reapply': reapply}) }}
+{%- endmacro %}
+
+{#
+  Changes to the masking policies, row access policy, and tags that `declaration` declares, as ALTER statements that
+  start with `alter`, such as `alter iceberg table <name>`. Undeclared ones are left as they are.
+  `details` holds what parquet_direct__get_governance read.
+#}
+{% macro parquet_direct__governance_changes(alter, declaration, details) -%}
+  {%- set changes = [] -%}
+  {%- set reapply = [] -%}
+  {%- set row_access_policy = declaration.row_access_policy -%}
+  {%- if row_access_policy -%}
+    {%- set on = [] -%}
+    {%- for name in row_access_policy.on -%}{%- do on.append(dbt_snowflake_parquet_direct.parquet_direct__normalize_identifier(name)) -%}{%- endfor -%}
+    {%- set current = details.row_access_policy -%}
+    {%- if not current or current.name != dbt_snowflake_parquet_direct.parquet_direct__qualify(row_access_policy.name) or current.on != on -%}
+      {%- set add = 'add row access policy ' ~ row_access_policy.name ~ ' on (' ~ row_access_policy.on | join(', ') ~ ')' -%}
+      {%- set statement = alter ~ ' ' ~ ('drop row access policy ' ~ current.name ~ ', ' if current else '') ~ add -%}
+      {%- do changes.append({'key': 'row_access_policy', 'description': 'row_access_policy: ' ~ (current.name if current else 'none') ~ ' -> ' ~ row_access_policy.name, 'alterable': true, 'statements': [statement]}) -%}
+    {%- endif -%}
+  {%- endif -%}
+  {%- set tags = {} -%}
+  {%- for name, value in declaration.tag | dictsort if (details.table_tags or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
+    {%- do tags.update({name: value}) -%}
+  {%- endfor -%}
+  {%- if tags -%}
+    {%- do changes.append({'key': 'tag', 'description': 'tag: ' ~ tags.keys() | join(', '), 'alterable': true, 'statements': [alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(tags)]}) -%}
+  {%- endif -%}
+  {%- for column in declaration.columns -%}
+    {%- set column_alter = alter ~ ' alter column ' ~ column.sql -%}
+    {%- set policy = column.masking_policy -%}
+    {%- if policy -%}
+      {%- set using = ' using (' ~ policy.using | join(', ') ~ ')' if policy.using else '' -%}
+      {#- FORCE replaces an existing policy in one statement, so the column is never unmasked in between. -#}
+      {%- set statement = column_alter ~ ' set masking policy ' ~ policy.name ~ using ~ ' force' -%}
+      {%- if (details.masking_policies or {}).get(column.identifier) != dbt_snowflake_parquet_direct.parquet_direct__qualify(policy.name) -%}
+        {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' masking_policy -> ' ~ policy.name, 'alterable': true, 'statements': [statement]}) -%}
+      {%- else -%}
+        {#- POLICY_REFERENCES reports no USING columns for masking policies, so adding, changing, or removing using is invisible; re-apply instead. -#}
+        {%- do reapply.append(statement) -%}
+      {%- endif -%}
+    {%- endif -%}
+    {%- set column_tags = {} -%}
+    {%- for name, value in column.tag | dictsort if ((details.column_tags or {}).get(column.identifier) or {}).get(dbt_snowflake_parquet_direct.parquet_direct__qualify(name)) != value -%}
+      {%- do column_tags.update({name: value}) -%}
+    {%- endfor -%}
+    {%- if column_tags -%}
+      {%- do changes.append({'key': 'columns', 'description': 'columns: ' ~ column.identifier ~ ' tag: ' ~ column_tags.keys() | join(', '), 'alterable': true, 'statements': [column_alter ~ ' set tag ' ~ dbt_snowflake_parquet_direct.parquet_direct__tag_list(column_tags)]}) -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{ return({'changes': changes, 'reapply': reapply}) }}
 {%- endmacro %}
 
 {# The error raised when ALTER cannot apply the declaration (design section 6, stage 3). #}

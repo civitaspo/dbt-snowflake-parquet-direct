@@ -93,4 +93,9 @@
   {%- set existing = {'exists': true, 'is_parquet_direct': true} -%}
   {%- do assert_equal('R04 re-creation without refresh on create', error_codes(preflight(lazy_declaration, none_catalog(), existing, true).warnings), ['R04']) -%}
   {%- do assert_equal('R04 only on full refresh', preflight(lazy_declaration, none_catalog(), existing, false).warnings, []) -%}
+  {%- set current_table = {'exists': true, 'is_parquet_direct': true, 'comment': dbt_snowflake_parquet_direct.parquet_direct__current_table_comment()} -%}
+  {%- do assert_equal('R13 another model never changes a current table', preflight(declaration, none_catalog(), current_table, true).errors,
+    ['R13: the table is the current table of a combined view built from previous_versions, so only that model changes it; use another alias']) -%}
+  {%- set versioned = dbt_snowflake_parquet_direct.parquet_direct__table_declaration(dbt_snowflake_parquet_direct.parquet_direct__normalize(with_overrides(full_config(), {'refresh_on_create': false, 'previous_versions': [{'table': 'orders_old'}]}))) -%}
+  {%- do assert_equal('the model with previous_versions changes its current table', preflight(versioned, none_catalog(), current_table, false).errors, []) -%}
 {% endmacro %}
