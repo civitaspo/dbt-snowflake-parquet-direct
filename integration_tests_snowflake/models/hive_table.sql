@@ -5,5 +5,6 @@
         'external_volume': var('external_volume'),
         'catalog': var('catalog_hive'),
         'base_location': var('base_prefix') ~ '/hive/',
+        'schema_inference_file_pattern_on_create': var('inference_pattern', none),
     }},
 ) }}

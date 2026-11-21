@@ -138,6 +138,7 @@ models:
 | `pattern` | `PATTERN` | string | None | Create-time only |
 | `iceberg_version` | `ICEBERG_VERSION` | 2 or 3 | Snowflake default | Re-creation (Parquet Direct does not support `UPGRADE`) |
 | `enable_schema_inference` | `ENABLE_SCHEMA_INFERENCE` | bool | TRUE without columns, FALSE with columns | Create-time only |
+| `schema_inference_file_pattern_on_create` | `PATTERN` on the inference probe | Non-empty string | None | Create-time only |
 | `enable_schema_evolution` | `ENABLE_SCHEMA_EVOLUTION` | bool | FALSE | Create-time only |
 | `match_by_column_name` | `MATCH_BY_COLUMN_NAME` | `case_insensitive` or `case_sensitive` | `case_insensitive` | Create-time only |
 | `auto_refresh` | `AUTO_REFRESH` | bool | FALSE | `ALTER` |
@@ -185,7 +186,7 @@ Snowflake does not enforce constraints. `DEFAULT`, `AUTOINCREMENT`, and `IDENTIT
 
 ### Rules per kind
 
-- **Data columns** map to Parquet columns. The list can be empty only when schema inference is on and `refresh_on_create` is TRUE. With inference on, Snowflake adds columns beyond those declared.
+- **Data columns** map to Parquet columns. The list can be empty when schema inference is on and either `refresh_on_create` is TRUE or `schema_inference_file_pattern_on_create` is set. Native Snowflake inference can add columns beyond those declared.
 - **Virtual columns** are computed from an expression. A common use is keeping the source file name through `METADATA$FILENAME`.
 - **Partition columns** are allowed only when the catalog integration uses `TABLE_FORMAT = NONE`. With `HIVE`, Snowflake infers them from `key=value` paths, so declaring them is an error. Expressions may use only the functions Snowflake allows, such as `SPLIT_PART`, `SUBSTR`, `CAST`, and `CASE`. The package checks only that the expression contains `METADATA$FILENAME` and leaves function checks to Snowflake.
 - Names must be unique across all three lists, ignoring case. Snowflake also rejects columns that differ only in case.
@@ -222,6 +223,8 @@ Each run goes through static validation, pre-flight checks, creation or reconcil
     - Look up any object with the same name. If it is a table or view that is not a Parquet Direct table, fail even with `--full-refresh`.
 3. **Creation** (no table yet): Issue `CREATE ICEBERG TABLE`.
 4. **Re-creation** (`--full-refresh`, unless `full_refresh` is false): Issue `CREATE OR REPLACE ICEBERG TABLE`, with `COPY GRANTS` when dbt-snowflake's standard `copy_grants` config is true (default false). When the model sets `full_refresh: false`, dbt's standard behavior ignores `--full-refresh`, and the run continues with reconciliation.
+
+    In steps 3 and 4, `schema_inference_file_pattern_on_create` first creates a Parquet Direct probe in the model's schema, using the same volume, catalog, and base location and the inference pattern as `PATTERN`. The package reads the data column list from `GET_DDL` to preserve physical Iceberg types, drops the probe, and adds partition columns, virtual columns, and constraints to the model's CREATE. The model table uses its own registration settings. The probe is named `__tmp_dbt_parquet_direct__<table>`, so each model has at most one. Before creating the model table, the package drops an Iceberg table at that name only when its comment identifies it as a probe. This also cleans up after switching to declared columns. The probe uses plain `CREATE`, so an unrelated object at that name stops inference. Model aliases whose prefixed name would exceed 255 characters require explicit columns or a shorter alias to use the option.
 5. **Reconciliation** (table exists): Read the table state, compare it with the declaration, and classify each difference as an alterable change or a re-creation-required change. Create-time options are not compared. `on_configuration_change` selects the behavior:
     - `apply` (default): If any re-creation-required change exists, fail without issuing any `ALTER`. Otherwise issue the `ALTER` statements.
     - `continue`: Issue nothing and fail on nothing. Log every difference as a warning and move on. Meant for temporary use during incidents.
@@ -256,7 +259,7 @@ Validation runs in three stages. Each stage collects every violation before fail
 | S02 | An invalid type or enum value, or a policy, tag, or foreign key table that is not a three-part name | Snowflake resolves unqualified names in the session schema, which can differ from the model's schema, so only three-part names compare reliably. |
 | S03 | `base_location` is missing, starts with `/`, contains `..`, has a scheme such as `s3://`, or does not end with `/` | It must be a directory relative to the external volume. |
 | S04 | `enable_schema_evolution: true` with `enable_schema_inference: false` | Snowflake rejects it. |
-| S05 | `refresh_on_create: false` with empty `columns` | Snowflake rejects it. |
+| S05 | `refresh_on_create: false` with empty `columns` and no `schema_inference_file_pattern_on_create` | Snowflake needs a column list to create the table without registering files. |
 | S06 | Empty `columns` with `enable_schema_inference: false` | The table would have no columns. |
 | S07 | `auto_refresh: true` with `refresh_paths` or `skip_refresh_if_refresh_paths_empty` set | A manual refresh is not allowed under auto refresh. |
 | S08 | `refresh_paths` contains an empty string, `..`, or duplicates | None |
@@ -269,6 +272,7 @@ Validation runs in three stages. Each stage collects every violation before fail
 | S15 | Unsupported dbt configuration: `cluster_by`, `unique_key`, `incremental_strategy`, or `contract.enforced: true` | It has no effect or is unsupported on Parquet Direct. `transient` is not checked, because projects often set it for every model. |
 | S16 | `previous_versions` without `columns`, a table listed twice, or an expression for an undeclared column | The combined view exposes the declared columns. |
 | S17 | `previous_versions` with `auto_refresh: true` | Auto refresh next to a previous version's files is not verified. |
+| S18 | `schema_inference_file_pattern_on_create` with data `columns` or `enable_schema_inference: false` | The pattern supplies data column definitions when inference is enabled. |
 
 Prefix matching of refresh paths is documented Snowflake behavior, so a refresh path without a trailing `/` is allowed. The README explains the prefix behavior.
 
@@ -291,6 +295,7 @@ Prefix matching of refresh paths is documented Snowflake behavior, so a refresh 
 | R14 | A previous version is not a Parquet Direct table, such as a view or a regular table | Previous versions are tables that read old files; a view could read anything. |
 | R15 | The current table is created, or re-created with `--full-refresh`, behind an existing combined view with `refresh_on_create: true` | The view reads the table as soon as it exists, before the run changes the view's policies. |
 | R12 | An existing current table that is not re-created is on another external volume than the declared one, even with `on_configuration_change: continue` | Its refresh would read the old volume, not the declared one. `--full-refresh` re-creates it on the declared volume. |
+| R16 | `schema_inference_file_pattern_on_create` with `TABLE_FORMAT = HIVE` | Snowflake does not add Hive partition columns when the model table is created with the explicit definitions from the probe. |
 
 ### Stage 3: differences from the existing table
 
@@ -480,6 +485,11 @@ The README also states what the package cannot prevent:
 | Replacing the view with `CREATE OR REPLACE VIEW ... COPY GRANTS` on every run | It drops policies and tags set outside dbt, and it changes a view whose declaration did not change. |
 | Changing the combined view in place, and reading its policies and tags back to decide how | It took `ALTER VIEW` and `CREATE OR ALTER VIEW` ordering rules, a statement count, and a `GET_DDL` parser, and still missed policies when tag values faked lines. A digest of what the package wrote, and re-creating the view when it differs, replaced it. |
 | `COMMENT` only from `persist_docs` | `comment` mirrors the DDL. It takes precedence, and `persist_docs` remains the fallback. |
+| `INFER_SCHEMA` over the external volume | It requires a named stage and would need a separate storage integration and stage setup. |
+| Inferring from a whole refresh path | A refresh path can contain many files. A separate pattern lets the model select one representative file. |
+| Using the inference `PATTERN` on the model table | `PATTERN` is fixed at creation. The model table must be able to register files beyond the inference sample. |
+| `CREATE ... LIKE`, a temporary probe, or a transient probe | Snowflake rejected these for Parquet Direct with an external volume. |
+| Reading the inferred types through `DESCRIBE` | It reports `LONG` and `DECIMAL(19,0)` as `NUMBER(19,0)`, which loses the physical type needed for registration. |
 
 ## 11. Open verification
 
@@ -916,3 +926,18 @@ These probes shaped section 8. One table read integer files under `d=2026-11-01/
 | --- | --- |
 | `UNION ALL BY NAME` of `OBJECT(str VARCHAR, num INT)` with a `CAST` to `OBJECT(STR VARCHAR, NUM NUMBER(10,0))` | Rejected (001790); the `CAST` with the field names as declared succeeded and kept them |
 | A manual refresh of a path that does not exist, with an unregistered file elsewhere under the base location | Registered nothing, although the documentation says it refreshes the whole base location |
+
+### Verification on 2026-11-21
+
+These probes were run in a disposable schema and storage prefix before implementation.
+
+| Operation | Result |
+| --- | --- |
+| `REFRESH_ON_CREATE = FALSE` without data columns | Error 091574, even with inference and evolution enabled. |
+| `INFER_SCHEMA` on an S3 URL or an external volume name | Snowflake requires a named stage. |
+| Create a probe over 41 files with a `PATTERN` that fully matches one relative path | Registered one file. A missing match or `BASE_LOCATION` pointing to a file returned 091574. Conflicting types across matching files returned 091563. |
+| Read the probe's Iceberg column types through `GET_DDL` and create a table with them | Registered the files with the expected types, including `LONG` for a Parquet `int64`. `DESCRIBE` reports `NUMBER(19,0)`, which Snowflake treats as `DECIMAL` when used in CREATE. |
+| Read column names through `GET_DDL` | Top-level names were upper-cased and quoted when needed. Nested field names with spaces were unquoted and failed when the DDL was replayed. |
+| Set or unset `PATTERN` with ALTER | Unsupported. |
+| Create with `LIKE`, `TEMPORARY`, or `TRANSIENT` against the external volume | Rejected. Dropping the permanent probe left the Parquet files in storage. |
+| Create a HIVE table with explicit data columns from the probe | The Hive partition column was missing. Explicit partition definitions returned 093763. |

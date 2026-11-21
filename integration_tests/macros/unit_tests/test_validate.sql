@@ -6,6 +6,17 @@
   {%- do assert_equal('full config is valid', validate(base, {}, body), []) -%}
   {%- do assert_equal('minimal config is valid', validate({'base_location': 'sales/'}), []) -%}
   {%- do assert_equal('not a mapping', error_codes(validate('sales/')), ['S02']) -%}
+  {%- set inferred = {'base_location': 'sales/', 'refresh_on_create': false, 'schema_inference_file_pattern_on_create': 'd=2/a[.]parquet'} -%}
+  {%- do assert_equal('pattern allows deferred registration without data columns', validate(inferred), []) -%}
+  {%- do assert_equal('deferred registration without either source of columns',
+    validate(with_overrides(inferred, {}, ['schema_inference_file_pattern_on_create'])),
+    ['S05: refresh_on_create: false requires columns or schema_inference_file_pattern_on_create']) -%}
+  {%- do assert_equal('pattern also works with refresh on create', validate(with_overrides(inferred, {'refresh_on_create': true})), []) -%}
+  {%- do assert_equal('pattern needs enabled inference', error_codes(validate(with_overrides(inferred, {'enable_schema_inference': false}))), ['S06', 'S18']) -%}
+  {%- do assert_equal('previous versions still needs data columns', error_codes(validate(with_overrides(inferred, {'previous_versions': [{'table': 'orders_old'}]}))), ['S16']) -%}
+  {%- for value in [42, '', '  '] -%}
+    {%- do assert_equal('pattern must be a non-empty string', error_codes(validate(with_overrides(inferred, {'schema_inference_file_pattern_on_create': value}))), ['S02']) -%}
+  {%- endfor -%}
 
   {%- set data_columns = [{'name': 'id', 'data_type': 'int'}] -%}
   {%- set cases = [
@@ -42,7 +53,7 @@
     ('base_location with a scheme', {'base_location': 's3://bucket/sales/'}, [], ['S03']),
     ('base_location with ..', {'base_location': 'a/../sales/'}, [], ['S03']),
     ('evolution without inference', {'enable_schema_evolution': true}, [], ['S04']),
-    ('refresh_on_create false without columns', {'refresh_on_create': false, 'columns': [], 'constraints': [], 'row_access_policy': none, 'enable_schema_inference': none}, [], ['S05']),
+    ('pattern with data columns', {'schema_inference_file_pattern_on_create': 'a[.]parquet', 'enable_schema_inference': true}, [], ['S18']),
     ('inference false without columns', {'columns': [], 'constraints': [], 'row_access_policy': none}, [], ['S06']),
     ('auto_refresh with refresh_paths', {'auto_refresh': true}, [], ['S07']),
     ('auto_refresh with skip setting', {'auto_refresh': true, 'refresh_paths': none, 'skip_refresh_if_refresh_paths_empty': true}, [], ['S07']),
@@ -88,6 +99,9 @@
   {%- do assert_equal('R02 partition columns with HIVE', error_codes(preflight(declaration, hive, absent, false).errors), ['R02']) -%}
   {%- set hive_declaration = dbt_snowflake_parquet_direct.parquet_direct__normalize({'base_location': 'sales/'}) -%}
   {%- do assert_equal('HIVE without partition columns', preflight(hive_declaration, hive, absent, false).errors, []) -%}
+  {%- set inferred = dbt_snowflake_parquet_direct.parquet_direct__normalize({'base_location': 'sales/', 'schema_inference_file_pattern_on_create': 'a[.]parquet'}) -%}
+  {%- do assert_equal('R16 pattern-based inference with HIVE', error_codes(preflight(inferred, hive, absent, false).errors), ['R16']) -%}
+  {%- do assert_equal('pattern-based inference with NONE', preflight(inferred, none_catalog(), absent, false).errors, []) -%}
   {%- do assert_equal('R03 another object', error_codes(preflight(declaration, none_catalog(), {'exists': true, 'is_parquet_direct': false, 'object_type': 'view'}, true).errors), ['R03']) -%}
   {%- set lazy_declaration = dbt_snowflake_parquet_direct.parquet_direct__normalize(with_overrides(full_config(), {'refresh_on_create': false})) -%}
   {%- set existing = {'exists': true, 'is_parquet_direct': true} -%}
