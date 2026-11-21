@@ -165,7 +165,9 @@ The regex limits the files Snowflake reads for inference. Snowflake can still li
 
 This option requires a `TABLE_FORMAT = NONE` catalog and `enable_schema_inference` set to `true` or omitted. Declare `columns` explicitly for `previous_versions`, nested field names containing spaces, or case-sensitive matching that requires mixed-case names.
 
-The package creates a short-lived Parquet Direct table in the model's schema with a name starting with `__tmp_dbt_parquet_direct__`. Snowflake applies any applicable future grants to the probe, and the model's policies are applied only to the model table. Use this option where the sampled data can be read under those grants. The probe is named `__tmp_dbt_parquet_direct__<table>`. If an interrupted run leaves it behind, the next run that creates the table drops it.
+The package creates a short-lived Parquet Direct table named `__tmp_dbt_parquet_direct__<table>` in the model's schema. The next creation cleans up an interrupted run's probe using its table comment. Keep that name available and run jobs that create the same table one at a time. If the prefixed name would exceed Snowflake's 255-character limit, use a shorter alias or declare `columns`.
+
+Applicable future grants cover the probe, and the model's policies apply only to the model table. Use this option where readers with those grants may see the sampled data.
 
 ### Columns
 

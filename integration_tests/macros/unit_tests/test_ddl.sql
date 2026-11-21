@@ -80,6 +80,8 @@ comment = 'Sales'
   {%- set ddl = "create or replace ICEBERG TABLE PROBE (\n\tID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0))\n)\n BASE_LOCATION = 'sales/';" -%}
   {%- set column_list = dbt_snowflake_parquet_direct.parquet_direct__inferred_column_list -%}
   {%- do assert_equal('preserve physical types from GET_DDL', column_list(ddl), 'ID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0))') -%}
+  {%- do assert_equal('parenthesis inside a quoted probe name is not the column list opening',
+    column_list(ddl.replace('TABLE PROBE', 'TABLE "__tmp_dbt_parquet_direct__Sales (daily)"')), column_list(ddl)) -%}
   {%- do assert_equal('missing column list', column_list("create or replace ICEBERG TABLE PROBE BASE_LOCATION = 'sales/';"), '') -%}
   {%- do assert_equal('missing end of column list', column_list('create or replace ICEBERG TABLE PROBE (ID LONG)'), '') -%}
   {%- do assert_equal('inferred columns go before partition columns and constraints, and the table gets its own pattern',
@@ -87,12 +89,13 @@ comment = 'Sales'
     "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    ID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0)),\n    source_path varchar as (METADATA$FILENAME),\n    unique (\"ID\")\n)\npartition by (source_path)\nbase_location = 'sales/'\npattern = 'd=2/.*'\nrefresh_on_create = false") -%}
   {%- do assert_equal('probe name prefixes the table name', dbt_snowflake_parquet_direct.parquet_direct__inference_relation(relation) | string, 'ANALYTICS.SALES.__tmp_dbt_parquet_direct__ORDERS') -%}
   {%- set probe_create = dbt_snowflake_parquet_direct.parquet_direct__inference_create_sql -%}
+  {%- set probe_comment = "\ncomment = 'Schema inference probe managed by dbt-snowflake-parquet-direct'" -%}
   {%- do assert_equal('probe uses the inference pattern and inherited volume and catalog',
     probe_create(relation, inferred),
-    "create or replace iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'") -%}
+    "create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'" ~ probe_comment) -%}
   {%- do assert_equal('probe uses explicit volume and catalog when supplied',
     probe_create(relation, with_overrides(inferred, {'options': with_overrides(inferred.options, {'external_volume': 'vol', 'catalog': 'cat'})})),
-    "create or replace iceberg table ANALYTICS.SALES.ORDERS\nexternal_volume = 'vol'\ncatalog = 'cat'\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'") -%}
+    "create iceberg table ANALYTICS.SALES.ORDERS\nexternal_volume = 'vol'\ncatalog = 'cat'\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'" ~ probe_comment) -%}
 
   {%- set replaced = create(relation, normalize({'base_location': 'sales/'}), replace=true, copy_grants=true) -%}
   {%- do assert_equal('replace with copy grants', replaced, ["create or replace iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\ncopy grants"]) -%}

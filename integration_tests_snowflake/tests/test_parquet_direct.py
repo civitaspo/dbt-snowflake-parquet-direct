@@ -188,7 +188,14 @@ def test_infers_columns_from_matched_file_on_create_and_full_refresh(environment
     environment.put("inferred/d=2/z.parquet", inferred_parquet(3, False, only_in_z=["value"]))
 
     leftover = "__TMP_DBT_PARQUET_DIRECT__INFERRED_TABLE"
-    environment.sql(f"create table {environment.table(leftover)} as select 1 as id")
+    environment.sql(f"""
+        create iceberg table {environment.table(leftover)} (id long)
+        external_volume = '{environment.vars["external_volume"]}'
+        catalog = '{environment.vars["catalog_none"]}'
+        base_location = '{environment.base}/inferred/'
+        refresh_on_create = false
+        comment = 'Schema inference probe managed by dbt-snowflake-parquet-direct'
+    """)
     common = {
         "inference_test_enabled": True,
         "refresh_paths": ["d=2/"],
@@ -231,6 +238,35 @@ def test_inference_fails_when_no_file_matches(environment):
     schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
     assert not environment.sql(f"show objects like 'INFERRED_WITHOUT_MATCH' in schema {schema}")
     assert inference_probe_names(environment) == set()
+
+
+def test_creation_preserves_other_tables_at_probe_name(environment):
+    model_alias = "occupied_probe"
+    occupied = environment.table(f"__tmp_dbt_parquet_direct__{model_alias}")
+    environment.sql(f"create table {occupied} as select 42 as id")
+
+    ok, output = environment.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_alias=model_alias)
+    assert ok and output.startswith("created"), output
+    assert environment.sql(f"select id from {occupied}") == [{"ID": 42}]
+
+    ok, output = environment.dbt(
+        "run", "-s", "inferred_table", "--full-refresh", inference_test_enabled=True,
+        inference_test_alias=model_alias, inference_pattern="d=2/a[.]parquet",
+    )
+    assert not ok and "already exists" in output.lower(), output
+    assert environment.sql(f"select id from {occupied}") == [{"ID": 42}]
+
+
+def test_long_alias_can_create_without_a_probe(environment):
+    model_alias = "a" * 255
+    ok, output = environment.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_alias=model_alias)
+    assert ok and output.startswith("created"), output
+
+    ok, output = environment.dbt(
+        "run", "-s", "inferred_table", "--full-refresh", inference_test_enabled=True,
+        inference_test_alias=model_alias, inference_pattern="d=2/a[.]parquet",
+    )
+    assert not ok and "255-character limit" in output, output
 
 
 def test_skipped_file_fails_the_run(environment):
