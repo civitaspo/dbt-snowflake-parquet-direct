@@ -174,14 +174,21 @@ def test_refresh_paths_register_only_listed_paths(environment):
     assert ok, output
     assert environment.count("manual_table") == 3
 
+    environment.put("refresh_paths/d=3/c.parquet", parquet([4]))
+    ok, output = environment.dbt("run", "-s", "manual_table", refresh_paths=["no-such-dir/"], **common)
+    assert ok, output
+    # Snowflake's documentation says a path that does not exist refreshes the whole base location; on 2026-11-20 it
+    # registered nothing. R08 follows the documentation, so this records the observed behavior, not a guarantee.
+    assert environment.count("manual_table") == 3, "a refresh of a path that does not exist registered the other paths' files"
+
 
 def test_infers_columns_from_matched_file_on_create_and_full_refresh(environment):
     environment.put("inferred/d=1/old.parquet", inferred_parquet(1, 1))
     environment.put("inferred/d=2/a.parquet", inferred_parquet(2, True))
     environment.put("inferred/d=2/z.parquet", inferred_parquet(3, False, only_in_z=["value"]))
 
-    unrelated = "__TMP_DBT_PARQUET_DIRECT__INFERRED_TABLE"
-    environment.sql(f"create table {environment.table(unrelated)} as select 1 as id")
+    leftover = "__TMP_DBT_PARQUET_DIRECT__INFERRED_TABLE"
+    environment.sql(f"create table {environment.table(leftover)} as select 1 as id")
     common = {
         "inference_test_enabled": True,
         "refresh_paths": ["d=2/"],
@@ -189,6 +196,7 @@ def test_infers_columns_from_matched_file_on_create_and_full_refresh(environment
     table = environment.table("inferred_table")
     ok, output = environment.dbt("run", "-s", "inferred_table", inference_pattern="d=2/a[.]parquet", **common)
     assert ok and output.startswith("created"), output
+    assert inference_probe_names(environment) == set(), "a probe left by an interrupted run is dropped on creation"
     columns = {row["name"]: row["type"] for row in environment.sql(f"desc iceberg table {table}")}
     assert set(columns) == {"ID", "FLAG", "EXTRA", "D"}, columns
     assert columns["FLAG"] == "BOOLEAN"
@@ -205,8 +213,7 @@ def test_infers_columns_from_matched_file_on_create_and_full_refresh(environment
     columns = {row["name"] for row in environment.sql(f"desc iceberg table {table}")}
     assert "ONLY_IN_Z" in columns
     assert environment.count("inferred_table") == 2
-    assert inference_probe_names(environment) == {unrelated}
-    assert environment.count(unrelated) == 1
+    assert inference_probe_names(environment) == set()
 
 
 def inference_probe_names(environment):
@@ -216,7 +223,6 @@ def inference_probe_names(environment):
 
 def test_inference_fails_when_no_file_matches(environment):
     environment.put("inferred/d=2/a.parquet", inferred_parquet(2, True))
-    existing_probes = inference_probe_names(environment)
     ok, output = environment.dbt(
         "run", "-s", "inferred_table", inference_test_enabled=True,
         inference_test_alias="inferred_without_match", inference_pattern="d=2/missing[.]parquet",
@@ -224,14 +230,7 @@ def test_inference_fails_when_no_file_matches(environment):
     assert not ok and "091574" in output, output
     schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
     assert not environment.sql(f"show objects like 'INFERRED_WITHOUT_MATCH' in schema {schema}")
-    assert inference_probe_names(environment) == existing_probes
-
-    environment.put("refresh_paths/d=3/c.parquet", parquet([4]))
-    ok, output = environment.dbt("run", "-s", "manual_table", refresh_paths=["no-such-dir/"], **common)
-    assert ok, output
-    # Snowflake's documentation says a path that does not exist refreshes the whole base location; on 2026-11-20 it
-    # registered nothing. R08 follows the documentation, so this records the observed behavior, not a guarantee.
-    assert environment.count("manual_table") == 3, "a refresh of a path that does not exist registered the other paths' files"
+    assert inference_probe_names(environment) == set()
 
 
 def test_skipped_file_fails_the_run(environment):

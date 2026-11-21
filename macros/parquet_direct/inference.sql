@@ -1,6 +1,11 @@
+{#- The probe's name is fixed per model, so a probe left by an interrupted run is replaced or dropped by the next creation. -#}
+{% macro parquet_direct__inference_relation(relation) -%}
+  {{ return(relation.incorporate(path={'identifier': '__tmp_dbt_parquet_direct__' ~ relation.identifier})) }}
+{%- endmacro %}
+
 {% macro parquet_direct__inference_create_sql(probe, declaration) -%}
   {%- set sql_string = dbt_snowflake_parquet_direct.parquet_direct__sql_string -%}
-  {%- set lines = ['create iceberg table ' ~ probe] -%}
+  {%- set lines = ['create or replace iceberg table ' ~ probe] -%}
   {%- for key in ['external_volume', 'catalog', 'base_location'] if declaration.options.get(key) is not none -%}
     {%- do lines.append(key ~ ' = ' ~ sql_string(declaration.options[key])) -%}
   {%- endfor -%}
@@ -17,11 +22,10 @@
 
 {% macro parquet_direct__infer_columns_sql(relation, declaration) -%}
   {%- set package = dbt_snowflake_parquet_direct -%}
-  {%- set identifier = '__tmp_dbt_parquet_direct__' ~ local_md5(invocation_id ~ ':' ~ relation) -%}
-  {%- set probe = relation.incorporate(path={'identifier': identifier}, quote_policy={'identifier': false}) -%}
+  {%- set probe = package.parquet_direct__inference_relation(relation) -%}
   {%- do run_query(package.parquet_direct__inference_create_sql(probe, declaration)) -%}
   {%- set ddl = run_query("select get_ddl('table', " ~ package.parquet_direct__sql_string(probe) ~ ", false)").columns[0].values()[0] -%}
-  {%- do run_query('drop table ' ~ probe) -%}
+  {%- do run_query('drop table if exists ' ~ probe) -%}
 
   {#- GET_DDL preserves physical Iceberg types such as LONG, which DESCRIBE reports as NUMBER(19,0). -#}
   {%- set columns = package.parquet_direct__inferred_column_list(ddl) -%}
