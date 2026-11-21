@@ -87,15 +87,25 @@ comment = 'Sales'
   {%- do assert_equal('inferred columns go before partition columns and constraints, and the table gets its own pattern',
     create(relation, inferred, inferred_columns_sql=column_list(ddl))[0],
     "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    ID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0)),\n    source_path varchar as (METADATA$FILENAME),\n    unique (\"ID\")\n)\npartition by (source_path)\nbase_location = 'sales/'\npattern = 'd=2/.*'\nrefresh_on_create = false") -%}
-  {%- do assert_equal('probe name prefixes the table name', dbt_snowflake_parquet_direct.parquet_direct__inference_relation(relation) | string, 'ANALYTICS.SALES.__tmp_dbt_parquet_direct__ORDERS') -%}
+  {%- set inference_relation = dbt_snowflake_parquet_direct.parquet_direct__inference_relation -%}
+  {%- do assert_equal('probe name prefixes the table name', inference_relation(relation) | string, 'ANALYTICS.SALES.__tmp_dbt_parquet_direct__ORDERS') -%}
+  {%- set prefix = '__tmp_dbt_parquet_direct__' -%}
+  {%- set limit_identifier = 'A' * (255 - prefix | length) -%}
+  {%- do assert_equal('a probe name at the limit keeps the whole identifier',
+    inference_relation(relation.incorporate(path={'identifier': limit_identifier})).identifier, prefix ~ limit_identifier) -%}
+  {%- set long_identifier = 'A' * 255 -%}
+  {%- set long_probe = inference_relation(relation.incorporate(path={'identifier': long_identifier})).identifier -%}
+  {%- do assert_equal('a long probe name fits the limit and ends with the identifier hash',
+    long_probe, prefix ~ ('A' * (248 - prefix | length)) ~ local_md5(long_identifier)[:7]) -%}
+  {%- set other_probe = inference_relation(relation.incorporate(path={'identifier': long_identifier[:-1] ~ 'B'})).identifier -%}
+  {%- do assert_equal('different long identifiers with the same prefix produce distinct probes', long_probe != other_probe, true) -%}
   {%- set probe_create = dbt_snowflake_parquet_direct.parquet_direct__inference_create_sql -%}
-  {%- set probe_comment = "\ncomment = 'Schema inference probe managed by dbt-snowflake-parquet-direct'" -%}
   {%- do assert_equal('probe uses the inference pattern and inherited volume and catalog',
     probe_create(relation, inferred),
-    "create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'" ~ probe_comment) -%}
+    "create or replace iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'") -%}
   {%- do assert_equal('probe uses explicit volume and catalog when supplied',
     probe_create(relation, with_overrides(inferred, {'options': with_overrides(inferred.options, {'external_volume': 'vol', 'catalog': 'cat'})})),
-    "create iceberg table ANALYTICS.SALES.ORDERS\nexternal_volume = 'vol'\ncatalog = 'cat'\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'" ~ probe_comment) -%}
+    "create or replace iceberg table ANALYTICS.SALES.ORDERS\nexternal_volume = 'vol'\ncatalog = 'cat'\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'") -%}
 
   {%- set replaced = create(relation, normalize({'base_location': 'sales/'}), replace=true, copy_grants=true) -%}
   {%- do assert_equal('replace with copy grants', replaced, ["create or replace iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\ncopy grants"]) -%}

@@ -194,7 +194,6 @@ def test_infers_columns_from_matched_file_on_create_and_full_refresh(environment
         catalog = '{environment.vars["catalog_none"]}'
         base_location = '{environment.base}/inferred/'
         refresh_on_create = false
-        comment = 'Schema inference probe managed by dbt-snowflake-parquet-direct'
     """)
     common = {
         "inference_test_enabled": True,
@@ -203,7 +202,7 @@ def test_infers_columns_from_matched_file_on_create_and_full_refresh(environment
     table = environment.table("inferred_table")
     ok, output = environment.dbt("run", "-s", "inferred_table", inference_pattern="d=2/a[.]parquet", **common)
     assert ok and output.startswith("created"), output
-    assert inference_probe_names(environment) == set(), "a probe left by an interrupted run is dropped on creation"
+    assert inference_probe_names(environment) == set(), "the next inference replaces and drops a leftover probe"
     columns = {row["name"]: row["type"] for row in environment.sql(f"desc iceberg table {table}")}
     assert set(columns) == {"ID", "FLAG", "EXTRA", "D"}, columns
     assert columns["FLAG"] == "BOOLEAN"
@@ -240,33 +239,19 @@ def test_inference_fails_when_no_file_matches(environment):
     assert inference_probe_names(environment) == set()
 
 
-def test_creation_preserves_other_tables_at_probe_name(environment):
-    model_alias = "occupied_probe"
-    occupied = environment.table(f"__tmp_dbt_parquet_direct__{model_alias}")
-    environment.sql(f"create table {occupied} as select 42 as id")
-
-    ok, output = environment.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_alias=model_alias)
-    assert ok and output.startswith("created"), output
-    assert environment.sql(f"select id from {occupied}") == [{"ID": 42}]
-
-    ok, output = environment.dbt(
-        "run", "-s", "inferred_table", "--full-refresh", inference_test_enabled=True,
-        inference_test_alias=model_alias, inference_pattern="d=2/a[.]parquet",
-    )
-    assert not ok and "already exists" in output.lower(), output
-    assert environment.sql(f"select id from {occupied}") == [{"ID": 42}]
-
-
-def test_long_alias_can_create_without_a_probe(environment):
+def test_infers_columns_for_a_255_character_alias(environment):
     model_alias = "a" * 255
-    ok, output = environment.dbt("run", "-s", "guarded_table", guarded_table_enabled=True, guarded_alias=model_alias)
-    assert ok and output.startswith("created"), output
-
+    environment.put("inferred/d=4/long_alias.parquet", inferred_parquet(4, True))
     ok, output = environment.dbt(
-        "run", "-s", "inferred_table", "--full-refresh", inference_test_enabled=True,
-        inference_test_alias=model_alias, inference_pattern="d=2/a[.]parquet",
+        "run", "-s", "inferred_table", inference_test_enabled=True,
+        inference_test_alias=model_alias, inference_pattern="d=4/long_alias[.]parquet",
     )
-    assert not ok and "255-character limit" in output, output
+    assert ok and output.startswith("created"), output
+    table = environment.table(model_alias)
+    columns = {row["name"]: row["type"] for row in environment.sql(f"desc iceberg table {table}")}
+    assert set(columns) == {"ID", "FLAG", "EXTRA", "D"}, columns
+    assert columns["FLAG"] == "BOOLEAN"
+    assert inference_probe_names(environment) == set()
 
 
 def test_skipped_file_fails_the_run(environment):
