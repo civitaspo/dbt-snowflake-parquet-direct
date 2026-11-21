@@ -108,7 +108,8 @@
   {%- endif -%}
 
   {%- if not state.exists or full_refresh_mode -%}
-    {%- for statement in dbt_snowflake_parquet_direct.parquet_direct__create_statements(target_relation, declaration, replace=state.exists, copy_grants=state.exists and config.get('copy_grants', false)) -%}
+    {%- set inferred_columns_sql = package.parquet_direct__infer_columns_sql(target_relation, declaration) if declaration.schema_inference_file_pattern_on_create is not none else none -%}
+    {%- for statement in package.parquet_direct__create_statements(target_relation, declaration, replace=state.exists, copy_grants=state.exists and config.get('copy_grants', false), inferred_columns_sql=inferred_columns_sql) -%}
       {%- do run_query(statement) -%}
     {%- endfor -%}
     {%- do action.update({'name': 'replaced' if state.exists else 'created'}) -%}

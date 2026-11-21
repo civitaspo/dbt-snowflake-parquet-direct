@@ -23,6 +23,7 @@
   ]} -%}
   {%- set cases = [
     ('inference is on by default without columns', {'base_location': 'a/'}, 0),
+    ('pattern-inferred columns do not count as drift', {'base_location': 'a/', 'schema_inference_file_pattern_on_create': 'sample[.]parquet', 'refresh_on_create': false}, 0),
     ('inference is off by default with columns', one_column, 1),
     ('schema evolution turns inference on', with_overrides(one_column, {'enable_schema_evolution': true}), 0),
     ('explicit inference keeps inferred columns', with_overrides(one_column, {'enable_schema_inference': true}), 0),
@@ -69,6 +70,28 @@ comment = 'Sales'
   {%- do assert_equal('log_event_level is set after creation', statements[1:], ['alter iceberg table ANALYTICS.SALES.ORDERS set log_event_level = ERROR']) -%}
 
   {%- do assert_equal('minimal create statement', create(relation, normalize({'base_location': 'sales/'})), ["create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'"]) -%}
+
+  {%- set inferred = normalize({
+    'base_location': 'sales/', 'refresh_on_create': false, 'pattern': 'd=2/.*',
+    'schema_inference_file_pattern_on_create': 'd=2/a\\.parquet',
+    'partition_columns': [{'name': 'source_path', 'data_type': 'varchar', 'expression': 'METADATA$FILENAME'}],
+    'constraints': [{'type': 'unique', 'columns': ['id']}],
+  }) -%}
+  {%- set ddl = "create or replace ICEBERG TABLE PROBE (\n\tID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0))\n)\n BASE_LOCATION = 'sales/';" -%}
+  {%- set column_list = dbt_snowflake_parquet_direct.parquet_direct__inferred_column_list -%}
+  {%- do assert_equal('preserve physical types from GET_DDL', column_list(ddl), 'ID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0))') -%}
+  {%- do assert_equal('missing column list', column_list("create or replace ICEBERG TABLE PROBE BASE_LOCATION = 'sales/';"), '') -%}
+  {%- do assert_equal('missing end of column list', column_list('create or replace ICEBERG TABLE PROBE (ID LONG)'), '') -%}
+  {%- do assert_equal('inferred columns go before partition columns and constraints, and the table gets its own pattern',
+    create(relation, inferred, inferred_columns_sql=column_list(ddl))[0],
+    "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    ID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0)),\n    source_path varchar as (METADATA$FILENAME),\n    unique (\"ID\")\n)\npartition by (source_path)\nbase_location = 'sales/'\npattern = 'd=2/.*'\nrefresh_on_create = false") -%}
+  {%- set probe_create = dbt_snowflake_parquet_direct.parquet_direct__inference_create_sql -%}
+  {%- do assert_equal('probe uses the inference pattern and inherited volume and catalog',
+    probe_create(relation, inferred),
+    "create iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'") -%}
+  {%- do assert_equal('probe uses explicit volume and catalog when supplied',
+    probe_create(relation, with_overrides(inferred, {'options': with_overrides(inferred.options, {'external_volume': 'vol', 'catalog': 'cat'})})),
+    "create iceberg table ANALYTICS.SALES.ORDERS\nexternal_volume = 'vol'\ncatalog = 'cat'\nbase_location = 'sales/'\npattern = 'd=2/a\\\\.parquet'") -%}
 
   {%- set replaced = create(relation, normalize({'base_location': 'sales/'}), replace=true, copy_grants=true) -%}
   {%- do assert_equal('replace with copy grants', replaced, ["create or replace iceberg table ANALYTICS.SALES.ORDERS\nbase_location = 'sales/'\ncopy grants"]) -%}

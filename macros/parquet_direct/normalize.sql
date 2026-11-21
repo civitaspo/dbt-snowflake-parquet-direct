@@ -81,6 +81,7 @@
     'base_location': declaration.base_location,
     'auto_refresh': declaration.get('auto_refresh') == true,
     'refresh_on_create': declaration.get('refresh_on_create') != false,
+    'schema_inference_file_pattern_on_create': declaration.get('schema_inference_file_pattern_on_create'),
     'schema_inference': inference if inference is not none else (data_columns | length == 0 or evolution),
     'schema_evolution': evolution,
     'refresh_paths': declaration.get('refresh_paths') or [],
