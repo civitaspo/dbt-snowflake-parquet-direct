@@ -36,6 +36,12 @@
   }) }}
 {%- endmacro %}
 
+{% macro parquet_direct__get_auto_refresh_status(relation) -%}
+  {%- set package = dbt_snowflake_parquet_direct -%}
+  {%- set name = package.parquet_direct__sql_string(relation | string) -%}
+  {{ return(package.parquet_direct__rows('select system$parquet_direct_auto_refresh_status(' ~ name ~ ') as status')[0].status) }}
+{%- endmacro %}
+
 {#
   What each OPERATION_STATUS means for the table. Failed statuses leave the table out of step with storage.
   The documentation lists REGISTER_FAILED and UNREGISTER_FAILED; SKIPPED is what the November 2026 evaluation observed.
@@ -129,7 +135,7 @@
 {% macro parquet_direct__check_registration(relation, declaration, since_sql) -%}
   {%- set status_text = none -%}
   {%- if declaration.auto_refresh -%}
-    {%- set status_text = dbt_snowflake_parquet_direct.parquet_direct__rows('select system$parquet_direct_auto_refresh_status(' ~ dbt_snowflake_parquet_direct.parquet_direct__sql_string(relation | string) ~ ') as status')[0].status -%}
+    {%- set status_text = dbt_snowflake_parquet_direct.parquet_direct__get_auto_refresh_status(relation) -%}
   {%- endif -%}
   {%- set rows = dbt_snowflake_parquet_direct.parquet_direct__rows(dbt_snowflake_parquet_direct.parquet_direct__history_sql(relation, since_sql)) -%}
   {%- set result = dbt_snowflake_parquet_direct.parquet_direct__registration_findings(relation, declaration, status_text, rows) -%}

@@ -71,9 +71,12 @@
   {%- if options.get('auto_refresh') is not none -%}
     {%- do lines.append('auto_refresh = ' ~ dbt_snowflake_parquet_direct.parquet_direct__bool_sql(declaration.auto_refresh and not defer_auto_refresh)) -%}
   {%- endif -%}
-  {%- for key in ['refresh_on_create', 'replace_invalid_characters'] if options.get(key) is not none -%}
-    {%- do lines.append(key ~ ' = ' ~ dbt_snowflake_parquet_direct.parquet_direct__bool_sql(options.get(key))) -%}
-  {%- endfor -%}
+  {%- if options.get('refresh_on_create') is not none or not declaration.refresh_on_create -%}
+    {%- do lines.append('refresh_on_create = ' ~ dbt_snowflake_parquet_direct.parquet_direct__bool_sql(declaration.refresh_on_create)) -%}
+  {%- endif -%}
+  {%- if options.get('replace_invalid_characters') is not none -%}
+    {%- do lines.append('replace_invalid_characters = ' ~ dbt_snowflake_parquet_direct.parquet_direct__bool_sql(options.replace_invalid_characters)) -%}
+  {%- endif -%}
   {%- if copy_grants -%}
     {%- do lines.append('copy grants') -%}
   {%- endif -%}

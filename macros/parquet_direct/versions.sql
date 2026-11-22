@@ -96,7 +96,7 @@
 {#
   The table to rename to the newest previous version, the last in the list, when that version is missing: the model's
   Parquet Direct table on the first change, else this model's current table. An older version that is missing is a
-  wrong name or a dropped table, and a table that marks itself as another model's current table is never suggested.
+  wrong name or a dropped table, and a table that marks itself as another model's current table is never selected.
   Returns the relation, or none.
 #}
 {% macro parquet_direct__rename_source(relation, public_state, current_state, previous) -%}
@@ -115,7 +115,7 @@
 
 {#
   Pre-flight checks for previous versions. `public_state` is the model's relation, `current_state` the current table,
-  and `creating` whether this run creates the current table. Returns a list of "Rxx: ..." messages.
+  and `creating` whether this run creates the current table. Returns errors and the effective refresh_on_create.
 #}
 {% macro parquet_direct__versions_preflight(relation, declaration, public_state, current_state, previous, creating) -%}
   {%- set package = dbt_snowflake_parquet_direct -%}
@@ -144,22 +144,18 @@
   {%- if current_state.exists and current_state.comment != marker -%}
     {%- do errors.append("R11: " ~ current_relation ~ " exists without the comment '" ~ marker ~ "', so previous_versions did not create it; rename it if another model or process uses it, or set that comment if it holds this model's files") -%}
   {%- endif -%}
-  {#- The existing view reads the current table as soon as it exists, before this run changes the view's policies. -#}
-  {%- if creating and declaration.refresh_on_create and public_state.exists and not public_is_table -%}
-    {%- do errors.append("R15: " ~ current_relation ~ " would be created behind the existing view " ~ relation ~ ", which reads its rows before this run changes the view; set refresh_on_create: false so its files are registered after the view changes") -%}
-  {%- endif -%}
   {%- set declared_volume = package.parquet_direct__normalize_identifier(declaration.options.external_volume) if declaration.options.get('external_volume') is not none else none -%}
   {#- An existing current table keeps its volume even under on_configuration_change: continue, and its refresh would read the old volume. -#}
   {%- if current_state.exists and not creating and declared_volume and current_state.external_volume and current_state.external_volume != declared_volume -%}
     {%- do errors.append("R12: " ~ current_relation ~ " uses external volume " ~ current_state.external_volume ~ ", but the model declares " ~ declared_volume ~ "; declare " ~ current_state.external_volume ~ ", or run with --full-refresh to re-create it on " ~ declared_volume) -%}
   {%- endif -%}
   {#-
-    A refresh of a path that does not exist refreshes the whole base location, so a current table that shares files
-    with a previous version could register them. Base locations are relative to an external volume, so locations on
-    different volumes never overlap here. An omitted external_volume is inherited and unknown, so it may be any volume.
+    An overlapping location requires scoped refreshes. Base locations are relative to an external volume, so locations
+    on different volumes never overlap here. An omitted external_volume is inherited and unknown, so it may be any volume.
     An existing current table keeps its base location until it is re-created, as with on_configuration_change: continue.
   -#}
   {%- set locations = [(declared_volume, declaration.base_location, '')] -%}
+  {%- set overlaps = [] -%}
   {%- if current_state.exists and not creating and current_state.base_location and current_state.base_location.rstrip('/') != declaration.base_location.rstrip('/') -%}
     {%- do locations.append((current_state.external_volume, current_state.base_location, ' of the existing ' ~ current_relation)) -%}
   {%- endif -%}
@@ -169,11 +165,12 @@
       {%- set path = location.rstrip('/') ~ '/' -%}
       {%- set same_volume = not volume or not item.state.external_volume or volume == item.state.external_volume -%}
       {%- if same_volume and (path.startswith(other) or other.startswith(path)) -%}
-        {%- do errors.append("R08: previous version " ~ item.relation ~ " reads base_location '" ~ item.state.base_location ~ "', which overlaps '" ~ location ~ "'" ~ owner ~ "; write the new files under a base_location of their own") -%}
+        {%- do overlaps.append("R08: previous version " ~ item.relation ~ " reads base_location '" ~ item.state.base_location ~ "', which overlaps '" ~ location ~ "'" ~ owner ~ "; set refresh_paths to the partitions written with the new types, because a refresh of the whole location reads the previous version's files") -%}
       {%- endif -%}
     {%- endfor -%}
   {%- endfor -%}
-  {{ return(errors) }}
+  {%- if not declaration.refresh_paths -%}{%- do errors.extend(overlaps) -%}{%- endif -%}
+  {{ return({'errors': errors, 'refresh_on_create': declaration.refresh_on_create and not (creating and overlaps)}) }}
 {%- endmacro %}
 
 {#

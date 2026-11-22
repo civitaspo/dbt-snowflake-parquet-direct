@@ -59,7 +59,6 @@
 {% macro parquet_direct__get_details(relation, declaration, state) -%}
   {%- set details = {} -%}
   {%- do details.update(state) -%}
-  {%- set qualified_name = dbt_snowflake_parquet_direct.parquet_direct__sql_string(relation | string) -%}
 
   {%- set columns = [] -%}
   {%- for row in dbt_snowflake_parquet_direct.parquet_direct__rows('desc iceberg table ' ~ relation) -%}
@@ -73,7 +72,7 @@
   {%- endfor -%}
   {%- do details.update({'parameters': parameters}) -%}
 
-  {%- set status = dbt_snowflake_parquet_direct.parquet_direct__rows('select system$parquet_direct_auto_refresh_status(' ~ qualified_name ~ ') as status')[0].status -%}
+  {%- set status = dbt_snowflake_parquet_direct.parquet_direct__get_auto_refresh_status(relation) -%}
   {%- do details.update({'auto_refresh': dbt_snowflake_parquet_direct.parquet_direct__parse_auto_refresh_status(status).enabled}) -%}
 
   {%- do details.update(dbt_snowflake_parquet_direct.parquet_direct__get_governance(relation, declaration)) -%}

@@ -39,21 +39,26 @@
     {%- set previous = package.parquet_direct__get_previous_versions(this, view_declaration) -%}
     {#-
       When the newest previous version is missing, every check below runs as if the table that holds its files were
-      renamed to it, so the rename is suggested only when the run would then go on, and nothing runs before.
+      renamed to it. The run only performs the rename after the checks pass.
     -#}
     {%- set source = package.parquet_direct__rename_source(this, public_state, state, previous) -%}
     {%- if source -%}
       {%- set missing = previous | last -%}
       {%- set rename_sql = 'alter iceberg table ' ~ source ~ ' rename to ' ~ missing.relation -%}
-      {%- do rename.update({'sql': rename_sql, 'missing': missing.relation | string, 'note': '\n  - R06: previous version table ' ~ missing.relation ~ ' does not exist; these errors assume `' ~ rename_sql ~ '` has run, so fix them before running it'}) -%}
+      {%- do rename.update({'sql': rename_sql, 'source': source, 'destination': missing, 'note': '\n  - R06: these checks assume `' ~ rename_sql ~ '` has run. dbt performs the rename after the checks pass.'}) -%}
       {%- set previous = previous[:-1] + [package.parquet_direct__read_previous_version(missing.version, source)] -%}
       {%- if source | string == target_relation | string -%}{%- set state = {'exists': false} -%}{%- else -%}{%- set public_state = {'exists': false} -%}{%- endif -%}
     {%- endif -%}
   {%- endif -%}
-  {%- set preflight = dbt_snowflake_parquet_direct.parquet_direct__preflight(declaration, catalog, state, full_refresh_mode) -%}
+  {%- set creating = not state.exists or full_refresh_mode -%}
+  {%- if has_previous_versions -%}
+    {%- set versions_preflight = package.parquet_direct__versions_preflight(this, view_declaration, public_state, state, previous, creating) -%}
+    {%- do declaration.update({'refresh_on_create': versions_preflight.refresh_on_create}) -%}
+  {%- endif -%}
+  {%- set preflight = package.parquet_direct__preflight(declaration, catalog, state, full_refresh_mode) -%}
   {%- set previous_selects = [] -%}
   {%- if has_previous_versions -%}
-    {%- do preflight.errors.extend(package.parquet_direct__versions_preflight(this, view_declaration, public_state, state, previous, not state.exists or full_refresh_mode)) -%}
+    {%- do preflight.errors.extend(versions_preflight.errors) -%}
     {%- if not preflight.errors -%}
       {%- for item in previous -%}
         {%- set select = package.parquet_direct__previous_version_select(view_declaration, item, loop.index0) -%}
@@ -76,7 +81,7 @@
   {%- set action = {'name': 'unchanged', 'statements': 0} -%}
 
   {%- set diff = {'changes': [], 'reapply': []} -%}
-  {%- if state.exists and not full_refresh_mode -%}
+  {%- if not creating -%}
     {%- set details = dbt_snowflake_parquet_direct.parquet_direct__get_details(target_relation, declaration, state) -%}
     {%- set diff = dbt_snowflake_parquet_direct.parquet_direct__diff(target_relation, declaration, details, catalog) -%}
     {%- for note in diff.notes -%}{%- do log(note, info=true) -%}{%- endfor -%}
@@ -86,7 +91,7 @@
     fail also stops for the combined view, unless this run creates or replaces the current table it reads. continue
     still re-creates the view, so a rerun after a failed type change never leaves a view that misses a version.
   -#}
-  {%- set view_changes = [{'description': 'the combined view differs from its declaration and is re-created with CREATE OR REPLACE VIEW ... COPY GRANTS'}] if view.differs and state.exists and not full_refresh_mode else [] -%}
+  {%- set view_changes = [{'description': 'the combined view differs from its declaration and is re-created with CREATE OR REPLACE VIEW ... COPY GRANTS'}] if view.differs and not creating else [] -%}
   {%- set mode = (config.get('on_configuration_change') or 'apply') | string | lower -%}
   {%- set apply_changes = not (changes and mode == 'continue') -%}
   {%- if (changes or view_changes) and mode == 'fail' -%}
@@ -104,10 +109,19 @@
     {{ exceptions.raise_compiler_error(dbt_snowflake_parquet_direct.parquet_direct__recreation_error(target_relation, diff.changes, model.name, config.get('full_refresh') == false)) }}
   {%- endif -%}
   {%- if rename.sql -%}
-    {{ exceptions.raise_compiler_error('Cannot build ' ~ public_relation ~ ':\n  - R06: previous version table ' ~ rename.missing ~ ' does not exist; rename the table that holds its files first: ' ~ rename.sql) }}
+    {%- set auto_refresh = package.parquet_direct__parse_auto_refresh_status(package.parquet_direct__get_auto_refresh_status(rename.source)) -%}
+    {%- if auto_refresh.enabled -%}
+      {%- do run_query('alter iceberg table ' ~ rename.source ~ ' set auto_refresh = false') -%}
+    {%- endif -%}
+    {%- do run_query(rename.sql) -%}
+    {%- do adapter.cache_renamed(rename.source, rename.destination.relation) -%}
+    {%- do log('Renamed ' ~ rename.source ~ ' to ' ~ rename.destination.relation ~ ' to keep its files readable as a previous version', info=true) -%}
+    {%- set renamed_version = package.parquet_direct__read_previous_version(rename.destination.version, rename.destination.relation) -%}
+    {%- set renamed_select = package.parquet_direct__previous_version_select(view_declaration, renamed_version, previous | length - 1) -%}
+    {%- set view = package.parquet_direct__view_statements(public_relation, view_declaration, previous_selects[:-1] + [renamed_select.sql], public_state) -%}
   {%- endif -%}
 
-  {%- if not state.exists or full_refresh_mode -%}
+  {%- if creating -%}
     {%- set inferred_columns_sql = package.parquet_direct__infer_columns_sql(target_relation, declaration) if declaration.schema_inference_file_pattern_on_create is not none else none -%}
     {%- for statement in package.parquet_direct__create_statements(target_relation, declaration, replace=state.exists, copy_grants=state.exists and config.get('copy_grants', false), inferred_columns_sql=inferred_columns_sql) -%}
       {%- do run_query(statement) -%}
