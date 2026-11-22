@@ -28,7 +28,7 @@ Each run creates the schema `PARQUET_DIRECT_INTEGRATION_TEST_<random>` and the S
 ## Run
 
 ```bash
-uv run --group snowflake pytest integration_tests_snowflake/tests -v
+uv run --group snowflake pytest integration_tests/tests -v
 ```
 
 Without the environment variables, every test is skipped. Put them in `mise.local.toml` (ignored by git) under `[env]` and run the command with `mise exec --`.

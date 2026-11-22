@@ -284,9 +284,9 @@ Install [mise](https://mise.jdx.dev/) and run `mise install`, then use:
 - `mise run fix` to apply supported automatic fixes.
 - `mise run test` to run the tests.
 
-The test task loads this package into a small dbt project with the DuckDB adapter, parses it, and runs the unit tests in `integration_tests/macros/unit_tests/` with `dbt run-operation run_unit_tests`. The unit tests cover the macros that issue no SQL: validation, DDL generation, change detection, and registration history evaluation. The task also runs `scripts/check_readme_reference.py`, which fails when the configuration reference misses an option that the package accepts.
+The test task loads this package into a small dbt project with the DuckDB adapter, parses it, and runs the unit tests in `unit_tests/macros/` with `dbt run-operation run_unit_tests`. The unit tests cover the macros that issue no SQL: validation, DDL generation, change detection, and registration history evaluation. The task also runs `scripts/check_readme_reference.py`, which fails when the configuration reference misses an option that the package accepts.
 
-Tests against Snowflake and S3 live in [integration_tests_snowflake](integration_tests_snowflake/README.md) and need cloud resources to run.
+Tests against Snowflake and S3 live in [integration_tests](integration_tests/README.md) and need cloud resources to run.
 
 dbt Core uses Python as its runtime; the package itself uses SQL and Jinja.
 

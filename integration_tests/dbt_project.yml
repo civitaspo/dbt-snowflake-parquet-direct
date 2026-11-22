@@ -1,4 +1,5 @@
-name: package_smoke_test
+name: parquet_direct_integration_tests
 version: 0.1.0
 config-version: 2
-profile: package_smoke_test
+profile: parquet_direct_integration_tests
+# pytest passes the environment-specific vars (external_volume, catalog_none, catalog_hive, base_prefix).
