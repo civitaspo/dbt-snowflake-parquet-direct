@@ -80,7 +80,7 @@ dbt run-operation parquet_direct_check_registration --args '{model: sales}'
 
 ### What the package cannot prevent
 
-- `pattern`, `enable_schema_inference`, `enable_schema_evolution`, `match_by_column_name`, and `refresh_on_create` are create-time options. Snowflake does not report them for an existing table, so a change takes effect only on the next full refresh.
+- `pattern`, `enable_schema_inference`, `schema_inference_file_pattern_on_create`, `enable_schema_evolution`, `match_by_column_name`, and `refresh_on_create` are create-time options. A change takes effect on the next full refresh.
 - With schema evolution disabled, a new column in a registered file is ignored and leaves no trace in history.
 - With `match_by_column_name: case_sensitive`, a file whose column spelling differs from the established mapping fails to register, and unquoted column names (stored upper-case) do not match lower-case Parquet columns. Use `quote: true` on such columns.
 - A refresh path is a prefix: `month=1` also matches `month=10`. End directory paths with `/`.
@@ -124,10 +124,11 @@ Set these directly under `config`.
 | `pattern` | string | None | `PATTERN`: a regular expression that limits the registered files. | Create-time only |
 | `iceberg_version` | `2`, `3` | Snowflake default | `ICEBERG_VERSION`. | Re-creation |
 | `enable_schema_inference` | boolean | `true` without `columns`, `false` with them | `ENABLE_SCHEMA_INFERENCE`: add columns found in the files at creation. | Create-time only |
+| `schema_inference_file_pattern_on_create` | string | None | Infer data columns from files whose paths relative to `base_location` fully match this Snowflake regex. See [Infer columns from selected files](#infer-columns-from-selected-files). | Create-time only |
 | `enable_schema_evolution` | boolean | `false` | `ENABLE_SCHEMA_EVOLUTION`: add columns and widen types on refresh. Requires schema inference. | Create-time only |
 | `match_by_column_name` | `case_insensitive`, `case_sensitive` | `case_insensitive` | `MATCH_BY_COLUMN_NAME`. | Create-time only |
 | `auto_refresh` | boolean | `false` | `AUTO_REFRESH`: register files from storage event notifications. Requires `AWS_SNS_TOPIC` on the external volume. | ALTER |
-| `refresh_on_create` | boolean | `true` | `REFRESH_ON_CREATE`: register existing files at creation. `false` requires `columns`. | Create-time only |
+| `refresh_on_create` | boolean | `true` | `REFRESH_ON_CREATE`: register existing files at creation. `false` requires `columns` or `schema_inference_file_pattern_on_create`. | Create-time only |
 | `replace_invalid_characters` | boolean | Default of the schema, database, or account | `REPLACE_INVALID_CHARACTERS`: replace invalid UTF-8 in query results. | ALTER |
 | `log_event_level` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`, `OFF` | None | `LOG_EVENT_LEVEL`. Set with ALTER right after creation. | ALTER |
 | `comment` | string | Model description with `persist_docs.relation` | `COMMENT`. | ALTER |
@@ -148,6 +149,25 @@ Set these directly under `config`.
 | --- | --- | --- |
 | `name` | string | The policy as `database.schema.policy`. |
 | `on` | non-empty list of column names | The policy arguments. |
+
+### Infer columns from selected files
+
+Use `schema_inference_file_pattern_on_create` to select a representative Parquet file when you leave `columns` empty. For example, set these keys under `meta.parquet_direct` to infer from one file and register all files in its partition:
+
+```yaml
+base_location: sales/
+schema_inference_file_pattern_on_create: 'd=2026-11-20/part-00000[.]parquet'
+refresh_on_create: false
+refresh_paths: ['d=2026-11-20/']
+```
+
+The regex limits the files Snowflake reads for inference. Snowflake can still list paths across `base_location`. Choose a pattern that matches one file to minimize reads. If nothing matches or the matched files have conflicting types, creation fails. The matched files supply the initial data column definitions, with names upper-cased. Registration of the model table follows its own `pattern`, `refresh_on_create`, and refresh settings. Native schema inference or evolution, when explicitly enabled, can add columns during that registration.
+
+This option requires a `TABLE_FORMAT = NONE` catalog and `enable_schema_inference` set to `true` or omitted. Declare `columns` explicitly for `previous_versions`, nested field names containing spaces, or case-sensitive matching that requires mixed-case names.
+
+The package creates a short-lived Parquet Direct probe named `__tmp_dbt_parquet_direct__<table>` in the model's schema. If the full probe name, including the database and schema, exceeds 255 characters, the package shortens the probe's table name and appends the first seven hex digits of the MD5 hash of `<table>` to fit the limit. Reserve the `__tmp_dbt_parquet_direct__` prefix for the package. The next creation that uses the option replaces a leftover probe with `CREATE OR REPLACE` and drops it after reading its columns. Run jobs that create the same table one at a time.
+
+Applicable future grants cover the probe, and the model's policies apply only to the model table. Use this option where readers with those grants may see the sampled data.
 
 ### Columns
 
@@ -252,7 +272,7 @@ dbt run-operation parquet_direct_check_registration --args '{model: sales, lookb
 
 ### Validation
 
-Configuration errors stop the run before any SQL and list every violation at once. Snowflake's own rules are checked first: for example, `enable_schema_evolution: true` with `enable_schema_inference: false`, `refresh_on_create: false` without `columns`, `refresh_paths` with `auto_refresh: true`, or `partition_columns` with a `TABLE_FORMAT = HIVE` catalog. The full list is in [docs/design.md](docs/design.md), section 6.
+Static configuration errors stop the run before any SQL and list every violation at once. For example, `enable_schema_evolution: true` requires schema inference, `refresh_on_create: false` requires a source of column definitions, and `refresh_paths` requires manual refresh. The run also checks catalog-dependent rules before issuing DDL. The full list is in [docs/design.md](docs/design.md), section 6.
 
 ## Development
 

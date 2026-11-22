@@ -41,12 +41,12 @@
   - With refresh_on_create: false and auto_refresh: true, the table is created with AUTO_REFRESH = FALSE and then
     switched on, the order Snowflake documents for backfilling existing files.
 #}
-{% macro parquet_direct__create_statements(relation, declaration, replace=false, copy_grants=false) -%}
+{% macro parquet_direct__create_statements(relation, declaration, replace=false, copy_grants=false, inferred_columns_sql=none) -%}
   {%- set options = declaration.options -%}
   {%- set defer_auto_refresh = declaration.auto_refresh and not declaration.refresh_on_create -%}
   {%- set lines = ['create ' ~ ('or replace ' if replace else '') ~ 'iceberg table ' ~ relation] -%}
 
-  {%- set elements = [] -%}
+  {%- set elements = [inferred_columns_sql] if inferred_columns_sql is not none else [] -%}
   {%- for column in declaration.columns -%}{%- do elements.append(dbt_snowflake_parquet_direct.parquet_direct__column_sql(column)) -%}{%- endfor -%}
   {%- for constraint in declaration.constraints -%}{%- do elements.append(dbt_snowflake_parquet_direct.parquet_direct__constraint_sql(constraint)) -%}{%- endfor -%}
   {%- if elements -%}

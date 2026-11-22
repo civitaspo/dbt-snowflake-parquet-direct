@@ -4,7 +4,7 @@
   {{ return({
     'top': [
       'external_volume', 'catalog', 'base_location', 'pattern', 'iceberg_version',
-      'enable_schema_inference', 'enable_schema_evolution', 'match_by_column_name',
+      'enable_schema_inference', 'schema_inference_file_pattern_on_create', 'enable_schema_evolution', 'match_by_column_name',
       'auto_refresh', 'refresh_on_create', 'replace_invalid_characters', 'log_event_level',
       'columns', 'virtual_columns', 'partition_columns', 'constraints',
       'row_access_policy', 'tag', 'comment',
@@ -168,6 +168,10 @@
       {%- do errors.append("S02: " ~ key ~ " must be a string") -%}
     {%- endif -%}
   {%- endfor -%}
+  {%- set inference_pattern = declaration.get('schema_inference_file_pattern_on_create') -%}
+  {%- if inference_pattern is not none and (inference_pattern is not string or inference_pattern | trim == '') -%}
+    {%- do errors.append("S02: schema_inference_file_pattern_on_create must be a non-empty string") -%}
+  {%- endif -%}
   {%- for key in ['enable_schema_inference', 'enable_schema_evolution', 'auto_refresh', 'refresh_on_create', 'replace_invalid_characters', 'skip_refresh_if_refresh_paths_empty'] -%}
     {%- if declaration.get(key) is not none and declaration.get(key) is not boolean -%}
       {%- do errors.append("S02: " ~ key ~ " must be a boolean") -%}
@@ -267,8 +271,8 @@
   {%- if evolution == true and inference == false -%}
     {%- do errors.append("S04: enable_schema_evolution: true requires enable_schema_inference to be true or omitted") -%}
   {%- endif -%}
-  {%- if declaration.get('refresh_on_create') == false and columns | length == 0 -%}
-    {%- do errors.append("S05: refresh_on_create: false requires columns") -%}
+  {%- if declaration.get('refresh_on_create') == false and not columns and inference_pattern is none -%}
+    {%- do errors.append("S05: refresh_on_create: false requires columns or schema_inference_file_pattern_on_create") -%}
   {%- endif -%}
   {%- if inference == false and columns | length == 0 -%}
     {%- do errors.append("S06: enable_schema_inference: false requires columns") -%}
@@ -384,6 +388,15 @@
     {%- do errors.append("S15: contract.enforced is not supported by parquet_direct") -%}
   {%- endif -%}
 
+  {%- if inference_pattern is not none -%}
+    {%- if columns -%}
+      {%- do errors.append("S18: schema_inference_file_pattern_on_create cannot be set with data columns") -%}
+    {%- endif -%}
+    {%- if inference == false -%}
+      {%- do errors.append("S18: schema_inference_file_pattern_on_create requires enable_schema_inference to be true or omitted") -%}
+    {%- endif -%}
+  {%- endif -%}
+
   {{ return(errors) }}
 {%- endmacro %}
 
@@ -395,8 +408,13 @@
     {%- do errors.append("R01: no catalog integration is configured or set as the default for the schema") -%}
   {%- elif catalog.catalog_source != 'OBJECT_STORE' or catalog.table_format not in ['NONE', 'HIVE'] -%}
     {%- do errors.append("R01: catalog integration " ~ catalog.name ~ " has CATALOG_SOURCE = " ~ catalog.catalog_source ~ " and TABLE_FORMAT = " ~ catalog.table_format ~ "; Parquet Direct requires OBJECT_STORE with NONE or HIVE") -%}
-  {%- elif catalog.table_format == 'HIVE' and declaration.partition_columns -%}
-    {%- do errors.append("R02: catalog integration " ~ catalog.name ~ " uses TABLE_FORMAT = HIVE, which infers partition columns; remove partition_columns") -%}
+  {%- elif catalog.table_format == 'HIVE' -%}
+    {%- if declaration.partition_columns -%}
+      {%- do errors.append("R02: catalog integration " ~ catalog.name ~ " uses TABLE_FORMAT = HIVE, which infers partition columns; remove partition_columns") -%}
+    {%- endif -%}
+    {%- if declaration.schema_inference_file_pattern_on_create is not none -%}
+      {%- do errors.append("R16: schema_inference_file_pattern_on_create is not supported with TABLE_FORMAT = HIVE; omit it and set refresh_on_create: true to infer data and Hive partition columns together") -%}
+    {%- endif -%}
   {%- endif -%}
   {%- if state.exists and not state.is_parquet_direct -%}
     {%- set hint = "; a combined view stays a view, so removing previous_versions is not supported" if state.object_type == 'view' else '' -%}
