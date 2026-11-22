@@ -103,14 +103,14 @@
   {%- set foreign = {'exists': true, 'is_parquet_direct': true, 'object_type': 'iceberg table', 'base_location': 'other/', 'comment': 'Orders of another model'} -%}
   {%- do assert_equal('a current table that previous_versions did not create is never renamed', source(relation, view, foreign, missing), none) -%}
 
-  {%- do assert_equal('a missing previous version', preflight(relation, declaration, absent, absent, missing, true),
+  {%- do assert_equal('a missing previous version', preflight(relation, declaration, absent, absent, missing, true).errors,
     ['R06: previous version table ANALYTICS.SALES."ORDERS_BEFORE_AMOUNT_SCALE" does not exist']) -%}
-  {%- do assert_equal('the public table must be renamed', error_codes(preflight(relation, declaration, public_table, absent, present, true)), ['R07']) -%}
-  {%- do assert_equal('the combined view is rebuilt', preflight(relation, declaration, view, current, present, false), []) -%}
+  {%- do assert_equal('the public table must be renamed', error_codes(preflight(relation, declaration, public_table, absent, present, true).errors), ['R07']) -%}
+  {%- do assert_equal('the combined view is rebuilt', preflight(relation, declaration, view, current, present, false).errors, []) -%}
   {%- set secure = {'exists': true, 'object_type': 'view', 'text': 'create or replace secure view ANALYTICS.SALES."Orders"\n' ~ marker ~ '\n(\n    id\n)\ncopy grants\nas select 1'} -%}
-  {%- do assert_equal('a re-created secure view is recognized', preflight(relation, declaration, secure, current, present, false), []) -%}
+  {%- do assert_equal('a re-created secure view is recognized', preflight(relation, declaration, secure, current, present, false).errors, []) -%}
   {%- set unrelated = {'exists': true, 'is_parquet_direct': false, 'object_type': 'view', 'text': 'create view ANALYTICS.SALES.ORDERS as select 1 as id'} -%}
-  {%- do assert_equal('a view that previous_versions did not create is not changed', preflight(relation, declaration, unrelated, current, present, false),
+  {%- do assert_equal('a view that previous_versions did not create is not changed', preflight(relation, declaration, unrelated, current, present, false).errors,
     ['R10: view ANALYTICS.SALES.ORDERS lacks the comment that previous_versions writes after its name, so previous_versions did not create it; drop or rename it']) -%}
   {%- for text in [
     'create view ANALYTICS.SALES.ORDERS as select * from ANALYTICS.SALES.ORDERS__current',
@@ -119,49 +119,59 @@
     "create view ANALYTICS.SALES.ORDERS as select '" ~ marker ~ "' as note",
     'create view ANALYTICS.SALES.ORDERS as select 1 as id -- create view copy ' ~ marker,
   ] -%}
-    {%- do assert_equal('a hand-made view is not changed: ' ~ text, error_codes(preflight(relation, declaration, {'exists': true, 'object_type': 'view', 'text': text}, current, present, false)), ['R10']) -%}
+    {%- do assert_equal('a hand-made view is not changed: ' ~ text, error_codes(preflight(relation, declaration, {'exists': true, 'object_type': 'view', 'text': text}, current, present, false).errors), ['R10']) -%}
   {%- endfor -%}
-  {%- do assert_equal('a current table that previous_versions did not create is not taken over', preflight(relation, declaration, absent, foreign, present, false),
+  {%- do assert_equal('a current table that previous_versions did not create is not taken over', preflight(relation, declaration, absent, foreign, present, false).errors,
     ["R11: ANALYTICS.SALES.ORDERS__current exists without the comment '" ~ package.parquet_direct__current_table_comment() ~ "', so previous_versions did not create it; rename it if another model or process uses it, or set that comment if it holds this model's files"]) -%}
-  {%- do assert_equal('a full refresh does not replace it either', error_codes(preflight(relation, declaration, absent, foreign, present, true)), ['R11']) -%}
+  {%- do assert_equal('a full refresh does not replace it either', error_codes(preflight(relation, declaration, absent, foreign, present, true).errors), ['R11']) -%}
   {%- set reserved = package.parquet_direct__normalize(versioned_config({'previous_versions': [{'table': 'orders__current'}]})) -%}
   {%- do assert_equal('the current table is not a previous version',
-    error_codes(preflight(relation, reserved, view, current, [{'version': reserved.previous_versions[0], 'relation': relation, 'state': old, 'columns': {}}], false)), ['R05']) -%}
+    error_codes(preflight(relation, reserved, view, current, [{'version': reserved.previous_versions[0], 'relation': relation, 'state': old, 'columns': {}}], false).errors), ['R05']) -%}
   {%- for state in [{'exists': true, 'is_parquet_direct': false, 'object_type': 'view'}, {'exists': true, 'is_parquet_direct': false, 'object_type': 'table'}] -%}
     {%- do assert_equal('a previous version must be a Parquet Direct table, not a ' ~ state.object_type,
-      preflight(relation, declaration, view, current, [{'version': version, 'relation': previous_relation, 'state': state, 'columns': {}}], false),
+      preflight(relation, declaration, view, current, [{'version': version, 'relation': previous_relation, 'state': state, 'columns': {}}], false).errors,
       ['R14: previous version ANALYTICS.SALES."ORDERS_BEFORE_AMOUNT_SCALE" is a ' ~ state.object_type ~ ', not a Parquet Direct table']) -%}
   {%- endfor -%}
 
-  {%- do assert_equal('a current table created behind the existing view registers no files at creation', preflight(relation, eager, view, absent, present, true),
-    ['R15: ANALYTICS.SALES.ORDERS__current would be created behind the existing view ANALYTICS.SALES.ORDERS, which reads its rows before this run changes the view; set refresh_on_create: false so its files are registered after the view changes']) -%}
-  {%- do assert_equal('so does a full refresh behind the view', error_codes(preflight(relation, eager, view, current, present, true)), ['R15']) -%}
-  {%- do assert_equal('refresh_on_create: false behind the view', preflight(relation, declaration, view, absent, present, true), []) -%}
-  {%- do assert_equal('the first transition has no view yet, so it may refresh on create', preflight(relation, eager, absent, absent, present, true), []) -%}
-  {%- do assert_equal('an existing current table is not created', preflight(relation, eager, view, current, present, false), []) -%}
-
   {%- set overlap = "R08: previous version ANALYTICS.SALES.\"ORDERS_BEFORE_AMOUNT_SCALE\" reads base_location 'sales/', which overlaps 'sales/'" -%}
-  {%- do assert_equal('a shared base_location stops the run even with refresh_paths', preflight(relation, declaration, view, current, shared, false),
-    [overlap ~ "; write the new files under a base_location of their own"]) -%}
-  {%- set nested = package.parquet_direct__normalize(versioned_config({'base_location': 'sales/v2/'})) -%}
-  {%- do assert_equal('a base_location inside a previous version''s overlaps it', error_codes(preflight(relation, nested, view, absent, shared, true)), ['R08']) -%}
-  {%- set moved = package.parquet_direct__normalize(versioned_config({'base_location': 'sales_v2/'})) -%}
-  {%- do assert_equal('an existing current table keeps its base_location until it is re-created', preflight(relation, moved, view, current, shared, false),
-    [overlap ~ " of the existing ANALYTICS.SALES.ORDERS__current; write the new files under a base_location of their own"]) -%}
-  {%- do assert_equal('a re-created current table uses the declared base_location', preflight(relation, moved, view, current, shared, true), []) -%}
+  {%- set refresh_help = "; set refresh_paths to the partitions written with the new types, because a refresh of the whole location reads the previous version's files" -%}
+  {%- set shared_create = preflight(relation, eager, view, absent, shared, true) -%}
+  {%- do assert_equal('a shared base_location can be created with refresh_paths', shared_create, {'errors': [], 'refresh_on_create': false}) -%}
+  {%- set create = package.parquet_direct__create_statements -%}
+  {%- set current_relation = package.parquet_direct__current_relation(relation) -%}
+  {%- set effective_declaration = with_overrides(eager, {'refresh_on_create': shared_create.refresh_on_create}) -%}
+  {%- do assert_equal('creating on a shared location disables refresh in SQL', '\nrefresh_on_create = false' in create(current_relation, effective_declaration)[0], true) -%}
+  {%- set eager_by_default = package.parquet_direct__normalize(with_overrides(versioned_config(), remove=['refresh_on_create'])) -%}
+  {%- set effective_default = with_overrides(eager_by_default, {'refresh_on_create': shared_create.refresh_on_create}) -%}
+  {%- do assert_equal('creating on a shared location also overrides the Snowflake default',
+    '\nrefresh_on_create = false' in create(current_relation, effective_default)[0], true) -%}
+  {%- do assert_equal('creating on a separate location keeps refresh_on_create true',
+    preflight(relation, eager, view, absent, present, true), {'errors': [], 'refresh_on_create': true}) -%}
+  {%- do assert_equal('creating on a separate location keeps refresh_on_create false',
+    preflight(relation, declaration, view, absent, present, true), {'errors': [], 'refresh_on_create': false}) -%}
+  {%- set unscoped = with_overrides(eager, {'refresh_paths': []}) -%}
+  {%- do assert_equal('a shared base_location requires refresh_paths', preflight(relation, unscoped, view, current, shared, false).errors, [overlap ~ refresh_help]) -%}
+  {%- set nested = with_overrides(unscoped, {'base_location': 'sales/v2/'}) -%}
+  {%- do assert_equal('a base_location inside a previous version''s overlaps it', error_codes(preflight(relation, nested, view, absent, shared, true).errors), ['R08']) -%}
+  {%- set moved = with_overrides(unscoped, {'base_location': 'sales_v2/'}) -%}
+  {%- do assert_equal('an existing current table keeps its base_location until it is re-created', preflight(relation, moved, view, current, shared, false).errors,
+    [overlap ~ " of the existing ANALYTICS.SALES.ORDERS__current" ~ refresh_help]) -%}
+  {%- do assert_equal('that existing location can be refreshed using refresh_paths',
+    preflight(relation, with_overrides(moved, {'refresh_paths': eager.refresh_paths}), view, current, shared, false).errors, []) -%}
+  {%- do assert_equal('a re-created current table uses the declared base_location', preflight(relation, moved, view, current, shared, true).errors, []) -%}
   {%- set other_volume = [{'version': version, 'relation': previous_relation, 'state': {'exists': true, 'is_parquet_direct': true, 'object_type': 'iceberg table', 'external_volume': 'OTHER_VOLUME', 'base_location': 'sales/'}, 'columns': {}}] -%}
-  {%- do assert_equal('the same base_location on another external volume does not overlap', preflight(relation, declaration, view, current, other_volume, false), []) -%}
-  {%- set inherited = package.parquet_direct__normalize(versioned_config({'external_volume': none})) -%}
-  {%- do assert_equal('an inherited external volume may be any volume', error_codes(preflight(relation, inherited, absent, absent, other_volume, true)), ['R08']) -%}
+  {%- do assert_equal('the same base_location on another external volume does not overlap', preflight(relation, unscoped, view, current, other_volume, false).errors, []) -%}
+  {%- set inherited = package.parquet_direct__normalize(versioned_config({'external_volume': none, 'refresh_paths': []})) -%}
+  {%- do assert_equal('an inherited external volume may be any volume', error_codes(preflight(relation, inherited, absent, absent, other_volume, true).errors), ['R08']) -%}
 
   {%- set old_volume = {} -%}
   {%- do old_volume.update(current) -%}
   {%- do old_volume.update({'external_volume': 'OLD_VOLUME'}) -%}
-  {%- do assert_equal('an existing current table on another external volume stops the run', preflight(relation, declaration, view, old_volume, present, false),
+  {%- do assert_equal('an existing current table on another external volume stops the run', preflight(relation, declaration, view, old_volume, present, false).errors,
     ['R12: ANALYTICS.SALES.ORDERS__current uses external volume OLD_VOLUME, but the model declares EXAMPLE_VOLUME; declare OLD_VOLUME, or run with --full-refresh to re-create it on EXAMPLE_VOLUME']) -%}
-  {%- do assert_equal('a re-created current table uses the declared external volume', preflight(relation, declaration, view, old_volume, present, true), []) -%}
+  {%- do assert_equal('a re-created current table uses the declared external volume', preflight(relation, declaration, view, old_volume, present, true).errors, []) -%}
   {%- set inherited_skipped = package.parquet_direct__normalize(versioned_config({'external_volume': none})) -%}
-  {%- do assert_equal('an inherited external volume is not compared', preflight(relation, inherited_skipped, view, old_volume, present, false), []) -%}
+  {%- do assert_equal('an inherited external volume is not compared', preflight(relation, inherited_skipped, view, old_volume, present, false).errors, []) -%}
 {% endmacro %}
 
 {% macro test_combined_view() %}

@@ -309,90 +309,139 @@ def flags(ids, values, value_type):
     return buffer.getvalue()
 
 
-def test_previous_version_keeps_files_readable_after_a_type_change(environment):
+@pytest.mark.parametrize("fail_view", [False, True], ids=["runs-once", "retries-view"])
+def test_previous_version_keeps_files_readable_after_a_type_change(environment, capsys, fail_view):
+    alias = "versioned_table_retry" if fail_view else "versioned_table"
     schema = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}"
-    environment.put("versioned_integer/d=1/integer.parquet", flags([1, 2], [0, 1], pa.int64()))
-    ok, output = environment.dbt("run", "-s", "versioned_table", "--full-refresh")
+    view = environment.table(alias)
+    integer_directory = f"{alias}_integer"
+    boolean_directory = f"{alias}_boolean"
+    string_directory = f"{alias}_string"
+
+    def run(*args, **options):
+        return environment.dbt("run", "-s", "versioned_table", *args, versioned_alias=alias, **options)
+
+    environment.put(f"{integer_directory}/d=1/integer.parquet", flags([1, 2], [0, 1], pa.int64()))
+    ok, output = run("--full-refresh", versioned_directory=integer_directory)
     assert ok, output
 
-    environment.put("versioned_boolean/d=2/boolean.parquet", flags([3, 4], [True, False], pa.bool_()))
-    previous = {"table": "versioned_table_before_boolean"}
+    environment.put(f"{boolean_directory}/d=2/boolean.parquet", flags([3, 4], [True, False], pa.bool_()))
+    previous = {"table": f"{alias}_before_boolean"}
     converted = {**previous, "columns": {"is_active": "case is_active when 0 then false when 1 then true end"}}
-    common = {"is_active_type": "boolean", "versioned_directory": "versioned_boolean"}
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], is_active_type="boolean")
-    assert not ok and "R08" in output and "fix them before running it" in output, "a rename that cannot help must not be suggested: " + output
-    assert environment.sql(f"show iceberg tables like 'VERSIONED_TABLE' in schema {schema}"), "nothing is renamed or created before the checks pass"
+    common = {"is_active_type": "boolean", "versioned_directory": boolean_directory}
+    public_table = f"show iceberg tables like '{alias.upper()}' in schema {schema}"
+    current = f"show iceberg tables like '{alias.upper()}__CURRENT' in schema {schema}"
+    archived_integer = f"show iceberg tables like '{previous['table'].upper()}' in schema {schema}"
+    ok, output = run(previous_versions=[converted], is_active_type="boolean", versioned_directory=integer_directory)
+    assert not ok and "R08" in output and "set refresh_paths" in output, output
+    assert environment.sql(public_table) and not environment.sql(current) and not environment.sql(archived_integer)
 
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], **common)
-    assert not ok
-    rename = f"alter iceberg table {environment.table('versioned_table')} rename to {environment.table('"VERSIONED_TABLE_BEFORE_BOOLEAN"')}"
-    assert "R06" in output and ("rename the table that holds its files first: " + rename).lower() in output.lower(), output
-    environment.sql(rename)
+    ok, output = run(previous_versions=[previous], **common)
+    assert not ok and "R09" in output and "IS_ACTIVE" in output, output
+    assert environment.sql(public_table) and not environment.sql(current) and not environment.sql(archived_integer)
 
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[previous], **common)
-    assert not ok
-    assert "R09" in output and "IS_ACTIVE" in output, output
-    assert not environment.sql(f"show objects like 'VERSIONED_TABLE__CURRENT' in schema {schema}")
-
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], on_configuration_change="fail", **common)
+    capsys.readouterr()
+    ok, output = run(previous_versions=[converted], on_configuration_change="fail", **common)
     assert ok, "creating the current table builds the view whatever on_configuration_change says: " + output
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[converted], on_configuration_change="fail", **common)
+    assert "Renamed" in capsys.readouterr().out
+    assert environment.sql(archived_integer)
+
+    ok, output = run(previous_versions=[converted], on_configuration_change="fail", **common)
     assert ok and output.startswith("unchanged"), "the stored view definition must read back as unchanged: " + output
-    rows = environment.sql(f"select id, is_active, d from {environment.table('versioned_table')} order by id")
+    rows = environment.sql(f"select id, is_active, d from {view} order by id")
     assert [(row["ID"], row["IS_ACTIVE"], row["D"]) for row in rows] == [(1, False, "1"), (2, True, "1"), (3, True, "2"), (4, False, "2")]
-    assert environment.sql(f"show views like 'VERSIONED_TABLE' in schema {schema}")
-    described = {row["name"]: row["comment"] for row in environment.sql(f"desc view {environment.table('versioned_table')}")}
+    assert environment.sql(f"show views like '{alias.upper()}' in schema {schema}")
+    described = {row["name"]: row["comment"] for row in environment.sql(f"desc view {view}")}
     assert described["IS_ACTIVE"] == "whether the customer is active", described
 
-    ok, output = environment.dbt("test", "-s", "versioned_table", previous_versions=[converted], **common)
+    ok, output = environment.dbt("test", "-s", "versioned_table", previous_versions=[converted], versioned_alias=alias, **common)
     assert ok, output
 
     environment.sql(f"create masking policy if not exists {schema}.flag_mask as (value boolean) returns boolean -> value")
-    environment.sql(f"alter view {environment.table('versioned_table')} modify column is_active set masking policy {schema}.flag_mask")
-    environment.sql(f"grant select on view {environment.table('versioned_table')} to role public")
-    policies = f"select policy_name from table({os.environ['SNOWFLAKE_DATABASE']}.information_schema.policy_references(ref_entity_name => '{environment.table('versioned_table')}', ref_entity_domain => 'view'))"
+    environment.sql(f"alter view {view} modify column is_active set masking policy {schema}.flag_mask")
+    environment.sql(f"grant select on view {view} to role public")
+    policies = f"select policy_name from table({os.environ['SNOWFLAKE_DATABASE']}.information_schema.policy_references(ref_entity_name => '{view}', ref_entity_domain => 'view'))"
     inverted = {**previous, "columns": {"is_active": "is_active = 0"}}
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="fail", **common)
+    ok, output = run(previous_versions=[inverted], on_configuration_change="fail", **common)
     assert not ok and "the combined view differs from its declaration" in output, output
     assert [row["POLICY_NAME"] for row in environment.sql(policies)] == ["FLAG_MASK"], "fail leaves the view as it is"
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="continue", **common)
+    ok, output = run(previous_versions=[inverted], on_configuration_change="continue", **common)
     assert ok and output.startswith("altered"), "continue still re-creates the view: " + output
-    rows = environment.sql(f"select id, is_active from {environment.table('versioned_table')} where d = '1' order by id")
+    rows = environment.sql(f"select id, is_active from {view} where d = '1' order by id")
     assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [(1, True), (2, False)], rows
     assert environment.sql(policies) == [], "re-creating drops a policy that the model does not declare"
-    grants = f"show grants on view {environment.table('versioned_table')}"
+    grants = f"show grants on view {view}"
     assert ("SELECT", "PUBLIC") in [(row["privilege"], row["grantee_name"]) for row in environment.sql(grants)], "re-creating the view keeps its grants"
-    ok, output = environment.dbt("run", "-s", "versioned_table", previous_versions=[inverted], on_configuration_change="fail", **common)
+    ok, output = run(previous_versions=[inverted], on_configuration_change="fail", **common)
     assert ok and output.startswith("unchanged"), "the re-created view must read back as unchanged: " + output
-    ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[inverted], **common)
+    ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[inverted], versioned_alias=alias, **common)
     assert ok, output
 
-    environment.put("versioned_string/d=3/string.parquet", flags([5, 6], ["true", "false"], pa.string()))
-    stringified = {"table": "versioned_table_before_string", "columns": {"is_active": "iff(is_active, 'true', 'false')"}}
-    second = {"is_active_type": "varchar", "versioned_directory": "versioned_string", "refresh_paths": ["d=3/"], "previous_versions": [inverted, stringified]}
-    current = f"show iceberg tables like 'VERSIONED_TABLE__CURRENT' in schema {schema}"
-    ok, output = environment.dbt("run", "-s", "versioned_table", **second)
-    assert not ok and "R15" in output and "fix them before running it" in output, output
-    assert environment.sql(current), "the current table must not be renamed or replaced before the checks pass"
+    environment.put(f"{string_directory}/d=3/string.parquet", flags([5, 6], ["true", "false"], pa.string()))
+    stringified = {"table": f"{alias}_before_string", "columns": {"is_active": "iff(is_active, 'true', 'false')"}}
+    second = {
+        "is_active_type": "varchar",
+        "versioned_directory": string_directory,
+        "refresh_paths": ["d=3/"],
+        "previous_versions": [inverted, stringified],
+    }
+    capsys.readouterr()
+    if fail_view:
+        ok, output = run(is_active_masking_policy=f"{schema}.flag_mask", **second)
+        assert not ok and "003530" in output, output
+        assert "Renamed" in capsys.readouterr().out
+        assert environment.sql(current), "the view must fail after the current table is created"
+        ok, output = run(on_configuration_change="continue", **second)
+        assert ok, "a continue rerun finishes the view of the failed type change: " + output
+        assert "Renamed" not in capsys.readouterr().out
+    else:
+        ok, output = run(**second)
+        assert ok, output
+        assert "Renamed" in capsys.readouterr().out
 
-    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, **second)
-    assert not ok
-    rename = f"alter iceberg table {environment.table('versioned_table__current')} rename to {environment.table('"VERSIONED_TABLE_BEFORE_STRING"')}"
-    assert "R06" in output and ("rename the table that holds its files first: " + rename).lower() in output.lower(), output
-    environment.sql(rename)
-    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, is_active_masking_policy=f"{schema}.flag_mask", **second)
-    assert not ok and environment.sql(current), "a boolean masking policy on the varchar column fails the view after the current table exists: " + output
-    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, on_configuration_change="continue", **second)
-    assert ok, "a continue rerun finishes the view of the failed type change: " + output
-    rows = environment.sql(f"select id, is_active, d from {environment.table('versioned_table')} order by id")
+    assert environment.sql(f"show iceberg tables like '{stringified['table'].upper()}' in schema {schema}")
+    rows = environment.sql(f"select id, is_active, d from {view} order by id")
     assert [(row["ID"], row["IS_ACTIVE"], row["D"]) for row in rows] == [
         (1, "true", "1"), (2, "false", "1"), (3, "true", "2"), (4, "false", "2"), (5, "true", "3"), (6, "false", "3"),
     ], rows
-    types = {row["name"]: row["type"] for row in environment.sql(f"desc view {environment.table('versioned_table')}")}
+    types = {row["name"]: row["type"] for row in environment.sql(f"desc view {view}")}
     assert types["IS_ACTIVE"].startswith("VARCHAR"), types
     assert ("SELECT", "PUBLIC") in [(row["privilege"], row["grantee_name"]) for row in environment.sql(grants)], "re-creating the view keeps its grants"
-    ok, output = environment.dbt("run", "-s", "versioned_table", refresh_on_create=False, on_configuration_change="fail", **second)
+    ok, output = run(on_configuration_change="fail", **second)
     assert ok and output.startswith("unchanged"), "the re-created view must read back as unchanged: " + output
+
+
+def test_type_changes_share_a_base_location(environment):
+    common = {"versioned_alias": "shared_versions", "versioned_directory": "shared_versions"}
+    view = environment.table("shared_versions")
+    environment.put("shared_versions/d=1/integer.parquet", flags([1, 2], [0, 1], pa.int64()))
+    ok, output = environment.dbt("run", "-s", "versioned_table", **common)
+    assert ok, output
+
+    environment.put("shared_versions/d=2/boolean.parquet", flags([3, 4], [True, False], pa.bool_()))
+    first = {"table": "shared_versions_before_boolean", "columns": {"is_active": "is_active = 1"}}
+    ok, output = environment.dbt(
+        "run", "-s", "versioned_table", is_active_type="boolean", previous_versions=[first], refresh_paths=["d=2/"], **common,
+    )
+    assert ok, output
+    rows = environment.sql(f"select id, is_active from {view} order by id")
+    assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [(1, False), (2, True), (3, True), (4, False)]
+
+    environment.put("shared_versions/d=3/string.parquet", flags([5, 6], ["true", "false"], pa.string()))
+    first["columns"] = {"is_active": "iff(is_active = 1, 'true', 'false')"}
+    second = {"table": "shared_versions_before_string", "columns": {"is_active": "iff(is_active, 'true', 'false')"}}
+    ok, output = environment.dbt(
+        "run", "-s", "versioned_table", is_active_type="varchar", previous_versions=[first, second], refresh_paths=["d=3/"], **common,
+    )
+    assert ok, output
+    rows = environment.sql(f"select id, is_active from {view} order by id")
+    assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [
+        (1, "false"), (2, "true"), (3, "true"), (4, "false"), (5, "true"), (6, "false"),
+    ]
+    for table, expected_ids in [
+        (first["table"], [1, 2]), (second["table"], [3, 4]), ("shared_versions__current", [5, 6]),
+    ]:
+        assert [row["ID"] for row in environment.sql(f"select id from {environment.table(table)} order by id")] == expected_ids
 
 
 def test_invalid_config_fails_before_any_sql(environment):
@@ -470,3 +519,30 @@ def test_auto_refresh_backfills_existing_files(environment):
     ok, output = environment.dbt("run", "-s", "auto_refresh_table", auto_refresh_table_enabled=True)
     assert not ok
     assert "broken.parquet" in output, output
+
+    environment.put("auto_versioned_integer/d=1/integer.parquet", flags([1], [1], pa.int64()))
+    ok, output = environment.dbt(
+        "run", "-s", "versioned_table", versioned_alias="auto_versioned_table",
+        versioned_directory="auto_versioned_integer", versioned_auto_refresh=True,
+    )
+    assert ok, output
+    source = environment.table("auto_versioned_table").upper()
+    status = environment.sql(f"select system$parquet_direct_auto_refresh_status('{source}') as status")[0]["STATUS"]
+    assert isinstance(json.loads(status), dict), status
+
+    environment.put("auto_versioned_boolean/d=2/boolean.parquet", flags([2], [False], pa.bool_()))
+    previous = {"table": "auto_versioned_before_boolean", "columns": {"is_active": "is_active = 1"}}
+    ok, output = environment.dbt(
+        "run", "-s", "versioned_table", versioned_alias="auto_versioned_table",
+        versioned_directory="auto_versioned_boolean", is_active_type="boolean", previous_versions=[previous],
+    )
+    assert ok, output
+    archived = environment.table(previous["table"]).upper()
+    status = environment.sql(f"select system$parquet_direct_auto_refresh_status('{archived}') as status")[0]["STATUS"]
+    try:
+        archived_status = json.loads(status or "")
+    except json.JSONDecodeError:
+        archived_status = None
+    assert not isinstance(archived_status, dict), status
+    rows = environment.sql(f"select id, is_active from {source} order by id")
+    assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [(1, True), (2, False)]
