@@ -165,7 +165,7 @@ The regex limits the files Snowflake reads for inference. Snowflake can still li
 
 This option requires a `TABLE_FORMAT = NONE` catalog and `enable_schema_inference` set to `true` or omitted. Declare `columns` explicitly for `previous_versions`, nested field names containing spaces, or case-sensitive matching that requires mixed-case names.
 
-The package creates a short-lived Parquet Direct probe named `__tmp_dbt_parquet_direct__<table>` in the model's schema. If that name exceeds 255 characters, the package keeps its first 248 characters and appends the first seven hex digits of the MD5 hash of `<table>`. Reserve the `__tmp_dbt_parquet_direct__` prefix for the package. The next creation that uses the option replaces a leftover probe with `CREATE OR REPLACE` and drops it after reading its columns. Run jobs that create the same table one at a time.
+The package creates a short-lived Parquet Direct probe named `__tmp_dbt_parquet_direct__<table>` in the model's schema. If the full probe name, including the database and schema, exceeds 255 characters, the package shortens the probe's table name and appends the first seven hex digits of the MD5 hash of `<table>` to fit the limit. Reserve the `__tmp_dbt_parquet_direct__` prefix for the package. The next creation that uses the option replaces a leftover probe with `CREATE OR REPLACE` and drops it after reading its columns. Run jobs that create the same table one at a time.
 
 Applicable future grants cover the probe, and the model's policies apply only to the model table. Use this option where readers with those grants may see the sampled data.
 

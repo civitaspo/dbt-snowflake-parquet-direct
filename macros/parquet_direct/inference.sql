@@ -1,9 +1,13 @@
 {% macro parquet_direct__inference_relation(relation) -%}
   {%- set identifier = '__tmp_dbt_parquet_direct__' ~ relation.identifier -%}
-  {%- if identifier | length > 255 -%}
-    {%- set identifier = identifier[:248] ~ local_md5(relation.identifier)[:7] -%}
+  {%- set probe = relation.incorporate(path={'identifier': identifier}) -%}
+  {%- set overflow = (probe | string | length) - 255 -%}
+  {%- if overflow > 0 -%}
+    {%- set retained_length = (identifier | length) - overflow - 7 -%}
+    {%- set identifier = identifier[:retained_length] ~ local_md5(relation.identifier)[:7] -%}
+    {%- set probe = relation.incorporate(path={'identifier': identifier}) -%}
   {%- endif -%}
-  {{ return(relation.incorporate(path={'identifier': identifier})) }}
+  {{ return(probe) }}
 {%- endmacro %}
 
 {% macro parquet_direct__inference_create_sql(probe, declaration) -%}

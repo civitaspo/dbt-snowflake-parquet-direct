@@ -89,15 +89,15 @@ comment = 'Sales'
     "create iceberg table ANALYTICS.SALES.ORDERS\n(\n    ID LONG,\n\tATTRIBUTES MAP(STRING, DECIMAL(19,0)),\n    source_path varchar as (METADATA$FILENAME),\n    unique (\"ID\")\n)\npartition by (source_path)\nbase_location = 'sales/'\npattern = 'd=2/.*'\nrefresh_on_create = false") -%}
   {%- set inference_relation = dbt_snowflake_parquet_direct.parquet_direct__inference_relation -%}
   {%- do assert_equal('probe name prefixes the table name', inference_relation(relation) | string, 'ANALYTICS.SALES.__tmp_dbt_parquet_direct__ORDERS') -%}
-  {%- set prefix = '__tmp_dbt_parquet_direct__' -%}
+  {%- set prefix = 'ANALYTICS.SALES.__tmp_dbt_parquet_direct__' -%}
   {%- set limit_identifier = 'A' * (255 - prefix | length) -%}
-  {%- do assert_equal('a probe name at the limit keeps the whole identifier',
-    inference_relation(relation.incorporate(path={'identifier': limit_identifier})).identifier, prefix ~ limit_identifier) -%}
-  {%- set long_identifier = 'A' * 255 -%}
-  {%- set long_probe = inference_relation(relation.incorporate(path={'identifier': long_identifier})).identifier -%}
-  {%- do assert_equal('a long probe name fits the limit and ends with the identifier hash',
+  {%- do assert_equal('a probe at the qualified name limit keeps the whole identifier',
+    inference_relation(relation.incorporate(path={'identifier': limit_identifier})) | string, prefix ~ limit_identifier) -%}
+  {%- set long_identifier = limit_identifier ~ 'A' -%}
+  {%- set long_probe = inference_relation(relation.incorporate(path={'identifier': long_identifier})) | string -%}
+  {%- do assert_equal('a long qualified probe name fits the limit and ends with the identifier hash',
     long_probe, prefix ~ ('A' * (248 - prefix | length)) ~ local_md5(long_identifier)[:7]) -%}
-  {%- set other_probe = inference_relation(relation.incorporate(path={'identifier': long_identifier[:-1] ~ 'B'})).identifier -%}
+  {%- set other_probe = inference_relation(relation.incorporate(path={'identifier': limit_identifier ~ 'B'})) | string -%}
   {%- do assert_equal('different long identifiers with the same prefix produce distinct probes', long_probe != other_probe, true) -%}
   {%- set probe_create = dbt_snowflake_parquet_direct.parquet_direct__inference_create_sql -%}
   {%- do assert_equal('probe uses the inference pattern and inherited volume and catalog',

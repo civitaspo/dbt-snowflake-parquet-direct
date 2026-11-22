@@ -239,18 +239,20 @@ def test_inference_fails_when_no_file_matches(environment):
     assert inference_probe_names(environment) == set()
 
 
-def test_infers_columns_for_a_255_character_alias(environment):
-    model_alias = "a" * 255
+def test_infers_columns_for_an_alias_at_the_qualified_name_limit(environment):
+    qualifier = f"{os.environ['SNOWFLAKE_DATABASE']}.{environment.schema}."
+    model_alias = "a" * (255 - len(qualifier))
     environment.put("inferred/d=4/long_alias.parquet", inferred_parquet(4, True))
     ok, output = environment.dbt(
         "run", "-s", "inferred_table", inference_test_enabled=True,
-        inference_test_alias=model_alias, inference_pattern="d=4/long_alias[.]parquet",
+        inference_test_alias=model_alias, inference_pattern="d=4/long_alias[.]parquet", refresh_paths=["d=4/"],
     )
     assert ok and output.startswith("created"), output
     table = environment.table(model_alias)
     columns = {row["name"]: row["type"] for row in environment.sql(f"desc iceberg table {table}")}
     assert set(columns) == {"ID", "FLAG", "EXTRA", "D"}, columns
     assert columns["FLAG"] == "BOOLEAN"
+    assert environment.count(model_alias) == 1
     assert inference_probe_names(environment) == set()
 
 
