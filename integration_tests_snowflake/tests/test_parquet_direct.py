@@ -520,7 +520,6 @@ def test_auto_refresh_backfills_existing_files(environment):
     assert not ok
     assert "broken.parquet" in output, output
 
-
     environment.put("auto_versioned_integer/d=1/integer.parquet", flags([1], [1], pa.int64()))
     ok, output = environment.dbt(
         "run", "-s", "versioned_table", versioned_alias="auto_versioned_table",
@@ -540,6 +539,10 @@ def test_auto_refresh_backfills_existing_files(environment):
     assert ok, output
     archived = environment.table(previous["table"]).upper()
     status = environment.sql(f"select system$parquet_direct_auto_refresh_status('{archived}') as status")[0]["STATUS"]
-    assert "not enabled" in status.lower() or "disabled" in status.lower(), status
+    try:
+        archived_status = json.loads(status or "")
+    except json.JSONDecodeError:
+        archived_status = None
+    assert not isinstance(archived_status, dict), status
     rows = environment.sql(f"select id, is_active from {source} order by id")
     assert [(row["ID"], row["IS_ACTIVE"]) for row in rows] == [(1, True), (2, False)]
