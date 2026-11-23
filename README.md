@@ -66,7 +66,7 @@ Tables under auto refresh rarely need `dbt run`. Check them on a schedule with t
 models:
   - name: sales
     data_tests:
-      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+      - dbt_snowflake_parquet_direct.parquet_direct_no_skipped_files:
           arguments:
             lookback_hours: 24
             # auto_refresh: true   # the expected mode; defaults to the model's auto_refresh
@@ -75,7 +75,7 @@ models:
 Or check one model once:
 
 ```bash
-dbt run-operation parquet_direct_check_registration --args '{model: sales}'
+dbt run-operation parquet_direct_find_skipped_files --args '{model: sales}'
 ```
 
 ### What the package cannot prevent
@@ -251,7 +251,7 @@ Set under `meta.parquet_direct.registration_check`. A skipped file is a file who
 | `ignore_file_patterns` | list of regular expressions | Empty | Skipped files whose name matches are reported in the log only. Use only syntax that Python and Snowflake read the same way: literals, `.`, bracket lists such as `[0-9]`, anchors, groups, `|`, and the quantifiers `*`, `+`, `?`, and `{n,m}`. |
 | `max_reported_files` | positive integer | `20` | How many skipped files an error or warning lists. The total is always reported. |
 
-### Generic test `parquet_direct_registration`
+### Generic test `parquet_direct_no_skipped_files`
 
 | Argument | Values | Default | Meaning |
 | --- | --- | --- | --- |
@@ -261,10 +261,10 @@ Set under `meta.parquet_direct.registration_check`. A skipped file is a file who
 
 The test does not support the `where` config.
 
-### Run-operation `parquet_direct_check_registration`
+### Run-operation `parquet_direct_find_skipped_files`
 
 ```bash
-dbt run-operation parquet_direct_check_registration --args '{model: sales, lookback_hours: 6}'
+dbt run-operation parquet_direct_find_skipped_files --args '{model: sales, lookback_hours: 6}'
 ```
 
 | Argument | Values | Default | Meaning |

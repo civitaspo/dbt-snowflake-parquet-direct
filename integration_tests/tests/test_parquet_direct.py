@@ -285,7 +285,7 @@ def test_ignore_patterns_agree_between_run_and_test(environment):
 
 def test_run_operation_reports_skipped_file(environment):
     ok, output = environment.dbt(
-        "run-operation", "parquet_direct_check_registration", "--args", "{model: manual_table, lookback_hours: 1}",
+        "run-operation", "parquet_direct_find_skipped_files", "--args", "{model: manual_table, lookback_hours: 1}",
         data_directory="skipped_file", refresh_on_create=False, refresh_paths=["d=1/"],
     )
     assert not ok
@@ -374,7 +374,7 @@ def test_previous_version_keeps_files_readable_after_a_type_change(environment, 
     assert ("SELECT", "PUBLIC") in [(row["privilege"], row["grantee_name"]) for row in environment.sql(grants)], "re-creating the view keeps its grants"
     ok, output = run(previous_versions=[inverted], on_configuration_change="fail", **common)
     assert ok and output.startswith("unchanged"), "the re-created view must read back as unchanged: " + output
-    ok, output = environment.dbt("run-operation", "parquet_direct_check_registration", "--args", "{model: versioned_table}", previous_versions=[inverted], versioned_alias=alias, **common)
+    ok, output = environment.dbt("run-operation", "parquet_direct_find_skipped_files", "--args", "{model: versioned_table}", previous_versions=[inverted], versioned_alias=alias, **common)
     assert ok, output
 
     environment.put(f"{string_directory}/d=3/string.parquet", flags([5, 6], ["true", "false"], pa.string()))
