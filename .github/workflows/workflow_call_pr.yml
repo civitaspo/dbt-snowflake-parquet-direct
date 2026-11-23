@@ -1,46 +1,28 @@
-name: PR checks
+name: PR checks (workflow_call)
+
 on:
   workflow_call:
     secrets:
       CSM_CI_CLIENT_APP_PRIVATE_KEY:
         required: false
+
 permissions: {}
+
 jobs:
-  checks:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  lint:
+    uses: ./.github/workflows/wc-lint.yml
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: "2026.10.11"
-          install_args: "--locked"
-          cache: false
-      - run: mise run lint
-      - run: mise run test
-  securefix:
+
+  tests:
+    uses: ./.github/workflows/wc-tests.yml
+    permissions:
+      contents: read
+
+  autofix:
     if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'civitaspo' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    uses: ./.github/workflows/wc-autofix.yml
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: "2026.10.11"
-          install_args: "--locked"
-          cache: false
-      - run: mise run fix
-      - uses: civitaspo/csm-ci-actions/actions/client/securefix@1d26058eac1836eac6db10bc715cca4460e24547 # v0.7.0
-        with:
-          client-id: ${{ vars.CSM_CI_CLIENT_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CSM_CI_CLIENT_APP_PRIVATE_KEY }}
-          server-repository: ${{ vars.CSM_CI_SERVER_REPOSITORY }}
+    secrets:
+      CSM_CI_CLIENT_APP_PRIVATE_KEY: ${{ secrets.CSM_CI_CLIENT_APP_PRIVATE_KEY }}
