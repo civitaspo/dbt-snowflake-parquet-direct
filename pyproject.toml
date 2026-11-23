@@ -12,7 +12,7 @@ dev = [
     "dbt-core>=1.12,<1.13",
     "dbt-duckdb>=1.11,<1.12",
 ]
-# Used only by integration_tests_snowflake/, which needs a Snowflake account and an S3 bucket.
+# Used only by integration_tests/, which needs a Snowflake account and an S3 bucket.
 snowflake = [
     "dbt-snowflake>=1.10",
     "boto3>=1.35",

@@ -1,5 +1,0 @@
-name: parquet_direct_snowflake_tests
-version: 0.1.0
-config-version: 2
-profile: parquet_direct_snowflake_tests
-# pytest passes the environment-specific vars (external_volume, catalog_none, catalog_hive, base_prefix).

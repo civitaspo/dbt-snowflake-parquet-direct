@@ -1,0 +1,4 @@
+name: parquet_direct_unit_tests
+version: 0.1.0
+config-version: 2
+profile: parquet_direct_unit_tests

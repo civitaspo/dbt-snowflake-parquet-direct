@@ -495,7 +495,7 @@ The README also states what the package cannot prevent:
 
 ## 11. Open verification
 
-A verification on 2026-11-15 settled the readable table state, the alterability of each option, the history function, nonexistent refresh paths, `COPY GRANTS`, and the absence of an `ACCOUNT_USAGE` history view. The [appendix](#verification-on-2026-11-15) records the results. The integration tests in `integration_tests_snowflake/` passed on 2026-11-15 for every scenario except auto refresh, so changes during Public Preview are caught by rerunning them.
+A verification on 2026-11-15 settled the readable table state, the alterability of each option, the history function, nonexistent refresh paths, `COPY GRANTS`, and the absence of an `ACCOUNT_USAGE` history view. The [appendix](#verification-on-2026-11-15) records the results. The integration tests in `integration_tests/` passed on 2026-11-15 for every scenario except auto refresh, so changes during Public Preview are caught by rerunning them.
 
 Still open, because the test environment had no S3 event notifications. Snowflake rejects `SET AUTO_REFRESH = TRUE` with error 091364 unless the external volume's active storage location sets `AWS_SNS_TOPIC`. Auto refresh is not used yet, so it will be verified when a model needs it:
 

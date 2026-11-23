@@ -34,7 +34,7 @@ REQUIRED = [
 ]
 pytestmark = pytest.mark.skipif(
     any(not os.environ.get(name) for name in REQUIRED),
-    reason="needs Snowflake and S3; see integration_tests_snowflake/README.md",
+    reason="needs Snowflake and S3; see integration_tests/README.md",
 )
 
 

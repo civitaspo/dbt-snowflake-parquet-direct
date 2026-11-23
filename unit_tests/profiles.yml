@@ -1,0 +1,7 @@
+parquet_direct_unit_tests:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: ':memory:'
+      threads: 1
