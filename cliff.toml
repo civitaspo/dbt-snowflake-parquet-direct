@@ -39,6 +39,13 @@ filter_commits = false
 tag_pattern = "v[0-9]*"
 topo_order = false
 sort_commits = "newest"
+# These merged before PR titles followed Conventional Commits; give them the types they should have had.
+commit_preprocessors = [
+  { pattern = '^Infer Parquet Direct columns from selected files \(#12\)', replace = "feat: infer Parquet Direct columns from selected files (#12)" },
+  { pattern = '^Automate Parquet Direct type migrations \(#14\)', replace = "feat: automate Parquet Direct type migrations (#14)" },
+  { pattern = '^Name test directories by scope \(#15\)', replace = "test: name test directories by scope (#15)" },
+  { pattern = '^Name the registration check after skipped files \(#16\)', replace = "refactor: name the registration check after skipped files (#16)" },
+]
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^feat", group = "Features" },
