@@ -390,9 +390,9 @@ order by operation_time
 
 A table under auto refresh rarely needs `dbt run` after creation. The same check is therefore available through two more entry points for scheduled monitoring. Both use the same macro as the materialization.
 
-- The generic test `parquet_direct_registration` runs in `dbt test` and `dbt build`. Its severity uses dbt's standard `severity` and `warn_if`. It also fails when the table's auto refresh mode differs from the expected one, taken from the model's `auto_refresh` unless the test's `auto_refresh` argument sets it, so a table whose auto refresh was turned off by mistake is caught. The argument must be a boolean. Without it, the model is found by its exact `relation_name`, so quoted names that differ only in case stay distinct, and the test fails to compile unless exactly one model matches. It does not support the `where` config.
+- The generic test `parquet_direct_no_skipped_files` runs in `dbt test` and `dbt build`. Its severity uses dbt's standard `severity` and `warn_if`. It also fails when the table's auto refresh mode differs from the expected one, taken from the model's `auto_refresh` unless the test's `auto_refresh` argument sets it, so a table whose auto refresh was turned off by mistake is caught. The argument must be a boolean. Without it, the model is found by its exact `relation_name`, so quoted names that differ only in case stay distinct, and the test fails to compile unless exactly one model matches. It does not support the `where` config.
 - Both entry points require `lookback_hours` to be a positive integer.
-- `dbt run-operation parquet_direct_check_registration --args '{model: sales}'` serves one-off investigation.
+- `dbt run-operation parquet_direct_find_skipped_files --args '{model: sales}'` serves one-off investigation.
 
 ## 8. Previous versions
 

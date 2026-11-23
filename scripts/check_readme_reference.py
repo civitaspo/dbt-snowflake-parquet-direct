@@ -49,8 +49,8 @@ def main() -> int:
         return rows_by_heading[headings[0]]
 
     keys = known_keys()
-    test_arguments = macro_arguments("macros/tests/parquet_direct_registration.sql", "{% test parquet_direct_registration")
-    operation_arguments = macro_arguments("macros/operations/parquet_direct_check_registration.sql", "{% macro parquet_direct_check_registration")
+    test_arguments = macro_arguments("macros/tests/parquet_direct_no_skipped_files.sql", "{% test parquet_direct_no_skipped_files")
+    operation_arguments = macro_arguments("macros/operations/parquet_direct_find_skipped_files.sql", "{% macro parquet_direct_find_skipped_files")
     with_rows = {
         "Table options": keys["top"] + keys["row_access_policy"],
         "Columns": keys["column"],

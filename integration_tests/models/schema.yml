@@ -1,10 +1,10 @@
 models:
   - name: manual_table
     data_tests:
-      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+      - dbt_snowflake_parquet_direct.parquet_direct_no_skipped_files:
           arguments:
             lookback_hours: 1
-      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+      - dbt_snowflake_parquet_direct.parquet_direct_no_skipped_files:
           arguments:
             lookback_hours: 1
             ignore_file_patterns: ['/broken[.]parquet$']
@@ -12,6 +12,6 @@ models:
             tags: [ignore_check]
   - name: versioned_table
     data_tests:
-      - dbt_snowflake_parquet_direct.parquet_direct_registration:
+      - dbt_snowflake_parquet_direct.parquet_direct_no_skipped_files:
           arguments:
             lookback_hours: 1

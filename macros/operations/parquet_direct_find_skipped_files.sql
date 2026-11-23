@@ -1,9 +1,9 @@
 {#
-  dbt run-operation parquet_direct_check_registration --args '{model: sales}'
+  dbt run-operation parquet_direct_find_skipped_files --args '{model: sales}'
   Checks one parquet_direct model's registrations over the last `lookback_hours` (default: the model's
   registration_check.lookback_hours, else 24) with the model's registration_check settings.
 #}
-{% macro parquet_direct_check_registration(model, lookback_hours=none) %}
+{% macro parquet_direct_find_skipped_files(model, lookback_hours=none) %}
   {%- set package = dbt_snowflake_parquet_direct -%}
   {%- set nodes = graph.nodes.values() | selectattr('resource_type', 'equalto', 'model') | selectattr('name', 'equalto', model) | list -%}
   {%- if nodes | length != 1 -%}
