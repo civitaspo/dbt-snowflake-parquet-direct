@@ -11,10 +11,10 @@ The package needs dbt-core 1.10 or later and dbt-snowflake. Add it to `packages.
 ```yaml
 packages:
   - git: "https://github.com/civitaspo/dbt-snowflake-parquet-direct.git"
-    revision: main
+    revision: v0.1.0
 ```
 
-Then run `dbt deps`. There is no release yet, so `main` is the only named revision; set `revision` to a full commit SHA to keep builds reproducible.
+Then run `dbt deps`. Set `revision` to a tag from [Releases](https://github.com/civitaspo/dbt-snowflake-parquet-direct/releases), usually the latest.
 
 ## Usage
 
